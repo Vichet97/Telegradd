@@ -476,8 +476,12 @@ async def _choose_group_dialog(client, prompt="Choose a group: "):
     if not dialogs:
         print("No groups found for this account.")
         return None
+    # Add back navigation option
+    print("0. Back")
     while True:
-        ch = input(f"{prompt}").strip()
+        ch = input(f"{prompt}(0 to go back): ").strip()
+        if ch == '0':
+            return None
         if ch.isdigit():
             n = int(ch)
             if n in dialogs:
@@ -661,7 +665,7 @@ async def _invite_one(client, target_entity, user_rec, verify=True, verbose=Fals
             else:
                 channel = InputPeerChannel(target_entity.id, getattr(target_entity, 'access_hash', None))
                 await client(InviteToChannelRequest(channel, [iu]))
-            await asyncio.sleep(10)
+            await asyncio.sleep(2)
         try:
             await do_invite(input_user)
             details = ''
@@ -817,9 +821,15 @@ async def enhanced_add_workflow():
     # 1) Pick a browsing account to choose source group
     print("Select an account to browse groups for source selection:")
     Database().view_all(admin=False)
-    browse_raw = input('Enter a single account number to browse (digit): ').strip()
+    browse_raw = input('Enter a single account number to browse (digit, 0 to go back): ').strip()
+    if browse_raw == '0':
+        print('Returning to previous menu...')
+        return
     while not browse_raw.isdigit():
-        browse_raw = input('Enter a single account number to browse (digit): ').strip()
+        browse_raw = input('Enter a single account number to browse (digit, 0 to go back): ').strip()
+        if browse_raw == '0':
+            print('Returning to previous menu...')
+            return
     browse_num = int(browse_raw)
     browse_clients = await TELEGRADD_client((browse_num,)).clients(restriction=False)
     if not browse_clients:
@@ -830,7 +840,7 @@ async def enhanced_add_workflow():
 
     src = await _choose_group_dialog(browse_client, prompt='Choose source group number: ')
     if src is None:
-        print('No source group available.')
+        print('No source group available or operation cancelled.')
         return
     src_group_id = src[0]
     src_group_name = src[2]
@@ -851,7 +861,11 @@ async def enhanced_add_workflow():
     if not tgt_dialogs:
         print('No target group available for this account.')
         return
-    tgt_choice = input('Enter number or paste link/@username: ').strip()
+    print("0. Back")
+    tgt_choice = input('Enter number or paste link/@username (0 to go back): ').strip()
+    if tgt_choice == '0':
+        print('Returning to previous menu...')
+        return
     if tgt_choice.isdigit() and int(tgt_choice) in tgt_dialogs:
         tgt = tgt_dialogs[int(tgt_choice)]
         target_entity = await browse_client.get_entity(int(tgt[0]))
@@ -866,7 +880,10 @@ async def enhanced_add_workflow():
     # 3) Account selection for adding
     print("Select accounts for adding:")
     Database().view_all(admin=False)
-    raw = input("Enter digits (all/ranges like 2-5/specific space-separated): ").lower().strip()
+    raw = input("Enter digits (all/ranges like 2-5/specific space-separated, 0 to go back): ").lower().strip()
+    if raw == '0':
+        print('Returning to previous menu...')
+        return
     tokens = [t for t in raw.split(' ') if t]
     selected = []
     if tokens and tokens[0] == 'all':
@@ -899,9 +916,13 @@ async def enhanced_add_workflow():
 
     # Daily limit per account
     try:
-        daily_raw = input('Set daily adding limit per account [default 5]: ').strip()
+        daily_raw = input('Set daily adding limit per account [default 5] (0 to go back): ').strip()
     except (KeyboardInterrupt, EOFError):
         print('\nCancelled by user. Returning to menu...')
+        return
+
+    if daily_raw == '0':
+        print('Returning to previous menu...')
         return
 
     if daily_raw == '':
@@ -913,9 +934,12 @@ async def enhanced_add_workflow():
             limit_set = True
         while not limit_set and not daily_raw.isdigit():
             try:
-                daily_raw = input('Set daily adding limit per account (digit, blank for 50): ').strip()
+                daily_raw = input('Set daily adding limit per account (digit, blank for 5, 0 to go back): ').strip()
             except (KeyboardInterrupt, EOFError):
                 print('\nCancelled by user. Returning to menu...')
+                return
+            if daily_raw == '0':
+                print('Returning to previous menu...')
                 return
             if daily_raw == '':
                 daily_limit = 5
@@ -995,17 +1019,33 @@ async def enhanced_add_workflow():
     def _append_added_csv_row(user_id, username, group_name, group_id, member_label, status, full_error_msg=''):
         _ensure_added_csv_header()
         try:
-            # Skip writing when verification failed is detected in any form
+            # Normalize error/status text
             try:
                 fem = ''
                 if isinstance(full_error_msg, (list, tuple)):
                     fem = ' '.join(str(x) for x in full_error_msg)
                 else:
                     fem = str(full_error_msg or '')
-                if 'verified=False' in fem or str(status).strip().lower() == 'verification failed':
-                    return  # do not append to CSV when verification failed
             except Exception:
-                pass
+                fem = str(full_error_msg or '')
+            fem_l = fem.lower()
+            status_norm = str(status or '').strip().lower()
+
+            # Blacklist: do not log rate limit noise
+            if 'too many requests' in fem_l:
+                return
+
+            # Whitelist: log when there is a verification flag, any 'Skipped' status, or "not a mutual contact"
+            has_verified_flag = ('verified=true' in fem_l) or ('verified=false' in fem_l) or ('verified=unknown' in fem_l)
+            is_not_mutual = ('not a mutual contact' in fem_l) or ('not mutual contact' in fem_l)
+            is_skipped_status = status_norm.startswith('skipped')
+            if not (has_verified_flag or is_not_mutual or is_skipped_status):
+                return
+
+            # Skip intermediate verify-false paths; allow final summary row where status == 'Verification failed'
+            if ('verified=false' in fem_l) and (status_norm != 'verification failed'):
+                return
+
             # Enforce de-duplication by (user_id, group_id)
             uid = str(user_id).strip() if user_id is not None else ''
             gid = str(group_id).strip() if group_id is not None else ''
@@ -1052,16 +1092,30 @@ async def enhanced_add_workflow():
     except Exception:
         pass
 
+    # Track cross-account attempts per user_id
+    attempt_counts = {}
+    last_failure = {}
+
+    # Initialize account states for all clients
     account_states = []
     total_accounts = len(clients)
-    for idx, client in enumerate(clients, start=1):
-        state = {'name': 'unknown', 'phone': None, 'added': 0, 'remaining': daily_limit, 'restricted': False, 'vf_consec': 0}
+    for idx, client in enumerate(clients):
+        state = {'name': 'unknown', 'phone': None, 'user_id': None, 'added': 0, 'remaining': daily_limit, 'restricted': False, 'vf_consec': 0, 'initialized': False, 'is_member': False}
+        account_states.append(state)
+
+    # Build global candidate list from first available account
+    global_candidates = []
+    existing_ids = set()
+    
+    # Find first working account to build candidate list
+    for idx, client in enumerate(clients):
         try:
             await _ensure_connected(client)
             me = await client.get_me()
-            state['name'] = getattr(me, 'username', None) or getattr(me, 'first_name', None) or str(getattr(me, 'id', 'me'))
-            state['user_id'] = getattr(me, 'id', None)
-            state['phone'] = getattr(me, 'phone', None)
+            account_states[idx]['name'] = getattr(me, 'username', None) or getattr(me, 'first_name', None) or str(getattr(me, 'id', 'me'))
+            account_states[idx]['user_id'] = getattr(me, 'id', None)
+            account_states[idx]['phone'] = getattr(me, 'phone', None)
+            account_states[idx]['initialized'] = True
 
             # Re-resolve target entity to avoid cross-client entity issues
             target_entity_local = target_entity
@@ -1069,29 +1123,16 @@ async def enhanced_add_workflow():
                 if 'target_link_hint' in locals() and target_link_hint:
                     target_entity_local = await client.get_entity(target_link_hint)
             except Exception:
-                # Fallback to original entity
                 target_entity_local = target_entity
 
-            # Visual header: show current, next account, remaining accounts, per-account limit
-            next_name = '-'
-            if idx < total_accounts:
-                try:
-                    await _ensure_connected(clients[idx])
-                    nxt = await clients[idx].get_me()
-                    next_name = getattr(nxt, 'username', None) or getattr(nxt, 'first_name', None) or str(getattr(nxt, 'id', 'next'))
-                except Exception:
-                    next_name = '-'
-            print(f"\n=== Account [{idx}/{total_accounts}] current: {state['name']} | next: {next_name} | remaining accounts: {total_accounts - idx} | per-account remaining: {state['remaining']} ===")
-
-            # Skip accounts that are not members of the target
+            # Check membership and auto-join if needed
             try:
                 checked = await _is_member(client, target_entity_local, getattr(me, 'id', None))
                 is_member = bool(checked)
             except Exception:
                 is_member = False
+            
             if not is_member:
-                # Auto-join if it's a public channel/group: try join by entity first;
-                # if that fails and we have a t.me/@ hint, resolve and try again. Then re-check membership.
                 try:
                     if isinstance(target_entity_local, TLChannel):
                         joined = False
@@ -1101,7 +1142,6 @@ async def enhanced_add_workflow():
                         except errors.UserAlreadyParticipantError:
                             is_member = True
                         except Exception:
-                            # Try by link/username hint if available
                             if 'target_link_hint' in locals() and isinstance(target_link_hint, str) and (('t.me/' in target_link_hint) or target_link_hint.startswith('@')):
                                 try:
                                     link_entity = await client.get_entity(target_link_hint)
@@ -1111,146 +1151,285 @@ async def enhanced_add_workflow():
                                     is_member = True
                                 except Exception:
                                     pass
-                        # Re-check membership after attempting join
-                        if not is_member:
+                        if not is_member and joined:
                             try:
-                                if joined:
-                                    # give a small delay to let join propagate
-                                    await asyncio.sleep(1)
+                                await asyncio.sleep(1)
                                 checked = await _is_member(client, target_entity_local, getattr(me, 'id', None))
                                 is_member = bool(checked)
                             except Exception:
                                 pass
                 except Exception:
-                    # Ignore join-related unexpected errors; will fall back to skip if still not member
                     pass
-            if not is_member:
-                print(f"Skipping account {state['name']} (not a member of target {target_group_name})")
-                continue
+            
+            account_states[idx]['is_member'] = is_member
+            
+            if is_member:
+                # Fetch source members and existing members
+                try:
+                    source_members_local = await _fetch_source_members(client, src_group_id)
+                    uniq_map_local = {}
+                    for m in source_members_local:
+                        uid_key = m.get('user_id')
+                        if uid_key is not None:
+                            uniq_map_local[uid_key] = m
+                    source_members_local = list(uniq_map_local.values())
+                    
+                    existing_ids = await _get_existing_member_ids(client, target_group_id)
+                    
+                    # Build global candidate list
+                    global_candidates = [m for m in source_members_local if (m.get('user_id') not in existing_ids and m.get('user_id') not in processed_ids and attempt_counts.get(m.get('user_id'), 0) < 3)]
+                    
+                    source_count = len(source_members_local)
+                    target_count = len(existing_ids)
+                    filtered_count = len(global_candidates)
+                    print(f"[INFO] Source members: {source_count} | Target members: {target_count} | Candidates after filtering: {filtered_count}\n")
+                    break
+                except Exception as e:
+                    print(f"[{account_states[idx]['name']}] Failed to fetch source members: {e}")
+                    continue
+        except Exception as e:
+            print(f"Failed to initialize account {idx}: {e}")
+            continue
 
-            # Per-account: fetch source members (roles like admin/owner/moderator and bots are excluded in _fetch_source_members)
+    # Initialize remaining selected accounts (names/ids/phones and membership) for proper rotation and reporting
+    for idx, client in enumerate(clients):
+        state = account_states[idx]
+        if not state['initialized']:
             try:
-                source_members_local = await _fetch_source_members(client, src_group_id)
-            except Exception as e:
-                print(f"[{state['name']}] Failed to fetch source members: {e}. Skipping account.")
+                await _ensure_connected(client)
+                me = await client.get_me()
+                state['name'] = getattr(me, 'username', None) or getattr(me, 'first_name', None) or str(getattr(me, 'id', 'me'))
+                state['user_id'] = getattr(me, 'id', None)
+                state['phone'] = getattr(me, 'phone', None)
+                state['initialized'] = True
+            except Exception:
+                state['restricted'] = True
                 continue
-            # Deduplicate by user_id per account
+        # Check membership in target and attempt to join if not a member
+        try:
+            target_entity_local = target_entity
+            try:
+                if 'target_link_hint' in locals() and target_link_hint:
+                    target_entity_local = await client.get_entity(target_link_hint)
+            except Exception:
+                target_entity_local = target_entity
+
+            try:
+                checked = await _is_member(client, target_entity_local, state.get('user_id'))
+                is_member = bool(checked)
+            except Exception:
+                is_member = False
+
+            if not is_member:
+                if isinstance(target_entity_local, TLChannel):
+                    joined = False
+                    try:
+                        await client(JoinChannelRequest(target_entity_local))
+                        joined = True
+                    except errors.UserAlreadyParticipantError:
+                        is_member = True
+                    except Exception:
+                        if 'target_link_hint' in locals() and isinstance(target_link_hint, str) and (("t.me/" in target_link_hint) or target_link_hint.startswith('@')):
+                            try:
+                                link_entity = await client.get_entity(target_link_hint)
+                                await client(JoinChannelRequest(link_entity))
+                                joined = True
+                            except errors.UserAlreadyParticipantError:
+                                is_member = True
+                            except Exception:
+                                pass
+                    if not is_member and joined:
+                        try:
+                            await asyncio.sleep(1)
+                            checked = await _is_member(client, target_entity_local, state.get('user_id'))
+                            is_member = bool(checked)
+                        except Exception:
+                            pass
+            account_states[idx]['is_member'] = is_member
+        except Exception:
+            pass
+
+    # Fallback: if selected accounts couldn't fetch candidates, use browsing account to fetch
+    if not global_candidates:
+        try:
+            print("[INFO] Selected accounts could not build candidate list. Falling back to browsing account to fetch source members...")
+            source_members_local = await _fetch_source_members(browse_client, src_group_id)
             uniq_map_local = {}
             for m in source_members_local:
                 uid_key = m.get('user_id')
                 if uid_key is not None:
                     uniq_map_local[uid_key] = m
             source_members_local = list(uniq_map_local.values())
+            existing_ids = await _get_existing_member_ids(browse_client, target_group_id)
+            filtered = [m for m in source_members_local if (m.get('user_id') not in existing_ids and m.get('user_id') not in processed_ids and attempt_counts.get(m.get('user_id'), 0) < 3)]
+            source_count = len(source_members_local)
+            target_count = len(existing_ids)
+            filtered_count = len(filtered)
+            print(f"[INFO] Source members: {source_count} | Target members: {target_count} | Candidates after filtering: {filtered_count}\n")
+            global_candidates = filtered
+        except Exception as e:
+            print(f"[WARN] Fallback fetch via browsing account failed: {e}")
 
-            # Existing members of target
-            existing_ids = await _get_existing_member_ids(client, target_group_id)
+    if not global_candidates:
+        print("No candidates found or no working accounts available.")
+        return
 
-            # Print counts: source members, target members, candidates after filtering
+    # Helper function to find next available account (excluding current)
+    def _find_next_account(start_idx):
+        # Iterate over other accounts only (exclude current start_idx entirely)
+        for i in range(1, total_accounts):  # 1..total_accounts-1
+            idx = (start_idx + i) % total_accounts
+            state = account_states[idx]
+            if state['remaining'] > 0 and not state['restricted'] and state['is_member']:
+                return idx
+        return None
+
+    # Round-robin processing: one member per account rotation
+    current_account_idx = 0
+    candidate_idx = 0
+    no_progress_rounds = 0
+    MAX_NO_PROGRESS_ROUNDS = total_accounts * 3
+
+    while candidate_idx < len(global_candidates) and no_progress_rounds < MAX_NO_PROGRESS_ROUNDS:
+        # Find next available account starting from current_account_idx
+        account_idx = _find_next_account(current_account_idx)
+        if account_idx is None:
+            print("No more available accounts.")
+            break
+
+        # Update current_account_idx immediately for proper rotation
+        current_account_idx = account_idx
+
+        client = clients[account_idx]
+        state = account_states[account_idx]
+        
+        # Initialize account if not done yet
+        if not state['initialized']:
             try:
-                source_count = len(source_members_local)
-                target_count = len(existing_ids)
-                candidates = [m for m in source_members_local if (m.get('user_id') not in existing_ids and m.get('user_id') not in processed_ids)]
-                filtered_count = len(candidates)
-                print(f"[INFO] Source members: {source_count} | Target members: {target_count} | Candidates after filtering: {filtered_count}\n")
+                await _ensure_connected(client)
+                me = await client.get_me()
+                state['name'] = getattr(me, 'username', None) or getattr(me, 'first_name', None) or str(getattr(me, 'id', 'me'))
+                state['user_id'] = getattr(me, 'id', None)
+                state['phone'] = getattr(me, 'phone', None)
+                state['initialized'] = True
             except Exception:
-                candidates = [m for m in source_members_local if (m.get('user_id') not in existing_ids and m.get('user_id') not in processed_ids)]
-                pass
+                state['restricted'] = True
+                current_account_idx = (account_idx + 1) % total_accounts
+                continue
 
-            for user_rec in candidates:
-                if state['remaining'] <= 0:
-                    break
-                uid = user_rec['user_id']
-                label = _format_member_label(user_rec)
-                try:
-                    status, msg = await _invite_one(client, target_entity_local, user_rec, verify=POST_INVITE_VERIFY_ENABLED, allow_contact_fallback=ADD_CONTACT_FALLBACK_ENABLED)
-                    if status == 'added':
-                        fem = str(msg or '')
-                        if POST_INVITE_VERIFY_ENABLED and 'verified=False' in fem:
-                            # Do not count as added when verification failed
-                            processed_ids.add(uid)
-                            _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, 'Verification failed', msg or '')
-                            print(f"[WARN] {label} verification failed after invite; not counting as added (remaining {state['remaining']})")
-                            try:
-                                state['vf_consec'] = int(state.get('vf_consec', 0)) + 1
-                            except Exception:
-                                state['vf_consec'] = int(state.get('vf_consec', 0)) + 1
-                            await asyncio.sleep(random.randint(10, 15))
-                        else:
-                            state['added'] += 1
-                            state['remaining'] -= 1
-                            processed_ids.add(uid)
-                            existing_ids.add(uid)
-                            _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, 'Added to group', msg or '')
-                            print(f"[ OK ] Added {label} -> {target_group_name} (remaining {state['remaining']})")
-                            # Reset consecutive verification failures on success
-                            state['vf_consec'] = 0
-                            await asyncio.sleep(random.randint(10, 15))
-                    elif status.startswith('skipped'):
+        # Visual header showing current and next account
+        # Compute the next account relative to the current_account_idx
+        next_account_idx = _find_next_account(current_account_idx)
+        next_name = '-' if next_account_idx is None else account_states[next_account_idx]['name']
+        print(f"\n=== Account [{account_idx + 1}/{total_accounts}] current: {state['name']} | next: {next_name} | remaining accounts: {total_accounts - account_idx - 1} | per-account remaining: {state['remaining']} ===")
+
+        # Get current candidate
+        user_rec = global_candidates[candidate_idx]
+        uid = user_rec['user_id']
+        label = _format_member_label(user_rec)
+
+        # Re-resolve target entity for this client
+        target_entity_local = target_entity
+        try:
+            if 'target_link_hint' in locals() and target_link_hint:
+                target_entity_local = await client.get_entity(target_link_hint)
+        except Exception:
+            target_entity_local = target_entity
+        try:
+            status, msg = await _invite_one(client, target_entity_local, user_rec, verify=POST_INVITE_VERIFY_ENABLED, allow_contact_fallback=ADD_CONTACT_FALLBACK_ENABLED)
+            
+            if status == 'added':
+                fem = str(msg or '')
+                if POST_INVITE_VERIFY_ENABLED and (('verified=False' in fem) or ('verified=unknown' in fem.lower())):
+                    # Treat verification failed/unknown as a failed attempt with retry up to 3 times
+                    attempt_counts[uid] = attempt_counts.get(uid, 0) + 1
+                    reason_label = 'Verification failed' if 'verified=False' in fem else 'Verification unknown'
+                    last_failure[uid] = (reason_label, fem)
+                    print(f"[RETRY] {label} {reason_label.lower()} (attempt {attempt_counts[uid]}/3); will retry with next account.")
+                    try:
+                        state['vf_consec'] = int(state.get('vf_consec', 0)) + 1
+                    except Exception:
+                        state['vf_consec'] = int(state.get('vf_consec', 0)) + 1
+                    if attempt_counts[uid] >= 3:
                         processed_ids.add(uid)
-                        label_map = {
-                            'skipped_privacy': 'Restricted (privacy)',
-                            'skipped_not_mutual': 'Skipped (not mutual)',
-                            'skipped_too_many_channels': 'Skipped (too many channels)',
-                            'skipped_kicked': 'Skipped (kicked)',
-                            'skipped_blocked': 'Skipped (blocked)',
-                        }
-                        reason = label_map.get(status, 'Skipped')
-                        _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, reason, msg or '')
-                        print(f"[SKIP] {label} -> {reason} (remaining {state['remaining']})")
-                        # Reset counter on any non-added result to enforce "one after another" semantics
-                        state['vf_consec'] = 0
-                    else:
-                        # Treat returned 'error' or other unexpected statuses
-                        if msg and ('A wait of' in msg and 'seconds is required' in msg):
-                            processed_ids.add(uid)
-                            # Do NOT write to CSV for FloodWait-style errors per user request
-                            print(f"[RST ] {label} -> Restricted: {msg} (remaining {state['remaining']})")
-                            if state['phone']:
-                                try:
-                                    Database().update_restriction(f"true:{datetime.now().strftime('%Y:%m:%d:%H')}", phone=state['phone'])
-                                    state['restricted'] = True
-                                except Exception:
-                                    pass
-                            break
-                        processed_ids.add(uid)
-                        _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, 'Restricted', (msg or ''))
-                        print(f"[RST ] {label} -> Restricted: {msg} (remaining {state['remaining']})")
-                        if state['phone']:
-                            try:
-                                Database().update_restriction(f"true:{datetime.now().strftime('%Y:%m:%d:%H')}", phone=state['phone'])
-                                state['restricted'] = True
-                            except Exception:
-                                pass
-                        # On restriction-like errors, skip the rest of this account immediately
-                        try:
-                            wait_seconds = None
-                            if msg:
-                                import re
-                                m = re.search(r"(\d)\sseconds", str(msg))
-                                wait_seconds = int(m.group(1)) if m else None
-                        except Exception:
-                            wait_seconds = None
-                        if wait_seconds:
-                            print(f"[INFO] Account {state['name']} marked RESTRICTED for ~{wait_seconds}s. Skipping remaining users for this account; restriction auto-clears in 24h.")
-                        else:
-                            print(f"[INFO] Account {state['name']} marked RESTRICTED. Skipping remaining users for this account; restriction auto-clears in 24h.")
-                        break
-                except (errors.PeerFloodError, errors.FloodWaitError, errors.UserBannedInChannelError) as e:
+                        _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, reason_label, fem)
+                        print(f"[FAIL] After 3 attempts: {label} -> {reason_label}")
+                        candidate_idx += 1  # Move to next candidate
+                    await asyncio.sleep(random.randint(10, 15))
+                else:
+                    state['added'] += 1
+                    state['remaining'] -= 1
                     processed_ids.add(uid)
-                    # Do NOT write to CSV for FloodWait-style errors per user request
-                    print(f"[RST ] {label} -> Restricted: {e} (remaining {state['remaining']})")
+                    existing_ids.add(uid)
+                    # Reset retry tracking on success
+                    attempt_counts.pop(uid, None)
+                    last_failure.pop(uid, None)
+                    _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, 'Added to group', msg or '')
+                    print(f"[ OK ] Added {label} -> {target_group_name} (remaining {state['remaining']})")
+                    # Reset consecutive verification failures on success
+                    state['vf_consec'] = 0
+                    candidate_idx += 1  # Move to next candidate
+                    await asyncio.sleep(random.randint(10, 15))
+            elif status.startswith('skipped'):
+                # Do not retry on any 'Skipped' outcomes; finalize immediately
+                reason_map = {
+                    'skipped_privacy': 'Restricted (privacy)',
+                    'skipped_not_mutual': 'Skipped (not mutual)',
+                    'skipped_too_many_channels': 'Skipped (too many channels)',
+                    'skipped_kicked': 'Skipped (kicked)',
+                    'skipped_blocked': 'Skipped (blocked)',
+                }
+                reason = reason_map.get(status, 'Skipped')
+                processed_ids.add(uid)
+                _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, reason, msg or '')
+                print(f"[FAIL] {label} -> {reason}")
+                # Reset counters and move to next candidate
+                state['vf_consec'] = 0
+                attempt_counts.pop(uid, None)
+                last_failure.pop(uid, None)
+                candidate_idx += 1  # Move to next candidate
+            else:
+                # Treat returned 'error' or other unexpected statuses
+                if msg and ('A wait of' in msg and 'seconds is required' in msg):
+                    # Account restriction detected; mark and break to next account
+                    attempt_counts[uid] = attempt_counts.get(uid, 0) + 1
+                    last_failure[uid] = ('Restricted', msg)
+                    print(f"[RST ] {label} -> Restricted: {msg} (attempt {attempt_counts[uid]}/3)")
+                    if attempt_counts[uid] >= 3:
+                        processed_ids.add(uid)
+                        # Do NOT log FloodWait immediately unless it is the 3rd failure per requirements
+                        _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, 'Restricted', (msg or ''))
+                        print(f"[FAIL] After 3 attempts: {label} -> Restricted")
+                        candidate_idx += 1  # Move to next candidate
                     if state['phone']:
                         try:
                             Database().update_restriction(f"true:{datetime.now().strftime('%Y:%m:%d:%H')}", phone=state['phone'])
                             state['restricted'] = True
                         except Exception:
                             pass
-                    # On Flood/Restriction, skip the rest of this account immediately; auto-revoked after 24h via DB janitor
+                # Generic error path
+                else:
+                    attempt_counts[uid] = attempt_counts.get(uid, 0) + 1
+                    last_failure[uid] = ('Restricted', msg or '')
+                    if attempt_counts[uid] >= 3:
+                        processed_ids.add(uid)
+                        _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, 'Restricted', (msg or ''))
+                        print(f"[FAIL] After 3 attempts: {label} -> Restricted")
+                        candidate_idx += 1  # Move to next candidate
+                    else:
+                        print(f"[RETRY] {label} -> Restricted: {msg} (attempt {attempt_counts[uid]}/3); will retry with next account.")
+                    if state['phone']:
+                        try:
+                            Database().update_restriction(f"true:{datetime.now().strftime('%Y:%m:%d:%H')}", phone=state['phone'])
+                            state['restricted'] = True
+                        except Exception:
+                            pass
+                    # On restriction-like errors, skip the rest of this account immediately
                     try:
-                        wait_seconds = getattr(e, 'seconds', None)
-                        if wait_seconds is None:
+                        wait_seconds = None
+                        if msg:
                             import re
-                            m = re.search(r"(\d)\sseconds", str(e))
+                            m = re.search(r"(\d)\sseconds", str(msg))
                             wait_seconds = int(m.group(1)) if m else None
                     except Exception:
                         wait_seconds = None
@@ -1258,25 +1437,42 @@ async def enhanced_add_workflow():
                         print(f"[INFO] Account {state['name']} marked RESTRICTED for ~{wait_seconds}s. Skipping remaining users for this account; restriction auto-clears in 24h.")
                     else:
                         print(f"[INFO] Account {state['name']} marked RESTRICTED. Skipping remaining users for this account; restriction auto-clears in 24h.")
-                    break
-                except Exception as e:
-                    processed_ids.add(uid)
-                    _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, 'Error', str(e))
-                    print(f"[ERR ] {label} -> Error: {e} (remaining {state['remaining']})")
-
-            # after finishing this account's loop, if limit consumed but not marked restricted yet, mark now
-            if state['remaining'] <= 0 and not state['restricted'] and state['phone']:
+        except (errors.PeerFloodError, errors.FloodWaitError, errors.UserBannedInChannelError) as e:
+            # Count as a failed attempt for this user, but do not finalize until 3 attempts
+            attempt_counts[uid] = attempt_counts.get(uid, 0) + 1
+            last_failure[uid] = ('Restricted', str(e))
+            print(f"[RST ] {label} -> Restricted: {e} (attempt {attempt_counts[uid]}/3)")
+            if attempt_counts[uid] >= 3:
+                processed_ids.add(uid)
+                # Do NOT write to CSV before 3rd failure; at 3rd, log the failure
+                _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, 'Restricted', str(e))
+                print(f"[FAIL] After 3 attempts: {label} -> Restricted")
+                candidate_idx += 1  # Move to next candidate
+            if state['phone']:
                 try:
                     Database().update_restriction(f"true:{datetime.now().strftime('%Y:%m:%d:%H')}", phone=state['phone'])
                     state['restricted'] = True
                 except Exception:
                     pass
         except Exception as e:
-            _append_added_csv_row('', '', target_group_name, target_group_id, state['name'], 'Error', f'client error: {e}')
-        finally:
-            acct_status = 'RESTRICTED' if state.get('restricted') else 'ACTIVE'
-            print(f"\n[ACCOUNT SUMMARY] {state.get('name','?')} (phone: {state.get('phone','?')}, id: {state.get('user_id','?')}) -> added {state.get('added',0)}, remaining {state.get('remaining',0)}, status {acct_status}")
-            account_states.append(state)
+            # Generic exception handling
+            attempt_counts[uid] = attempt_counts.get(uid, 0) + 1
+            last_failure[uid] = ('Error', str(e))
+            print(f"[ERR ] {label} -> Error: {e} (attempt {attempt_counts[uid]}/3)")
+            if attempt_counts[uid] >= 3:
+                processed_ids.add(uid)
+                _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, 'Error', str(e))
+                print(f"[FAIL] After 3 attempts: {label} -> Error")
+                candidate_idx += 1  # Move to next candidate
+        
+        # Move to next account for round-robin (ALWAYS rotate after each attempt)
+        # current_account_idx is already updated at loop start
+        
+        # Check if we made progress
+        if candidate_idx < len(global_candidates):
+            no_progress_rounds = 0
+        else:
+            no_progress_rounds += 1
 
     # Summary only; CSV was appended per-attempt, do not overwrite
     print(f"\nAppended records to {_CSV_PATH}")

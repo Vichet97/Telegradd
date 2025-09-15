@@ -235,7 +235,6 @@ user_id,username,group_name,group_id,member_label,status,full error message
 5995944486,,iMobile Phone,3042105460,ធឿន ម៉េង,Added to group,"verified=True path=from_record,refreshed_access_hash"
 6404339487,Rotha02082008,iMobile Phone,3042105460,Reat (@Rotha02082008),Added to group,"verified=True path=from_record,refreshed_access_hash"
 6486264281,,iMobile Phone,3042105460,seang,Added to group,"verified=True path=from_record,refreshed_access_hash"
-8159571116,,iMobile Phone,3042105460,Jea Linn,Restricted,Invite failed: Too many requests (caused by InviteToChannelRequest)
 7775217208,s_e_a_v_e,iMobile Phone,3042105460,Pov meas (@s_e_a_v_e),Added to group,"verified=True path=from_record,refreshed_access_hash"
 5202132454,,iMobile Phone,3042105460,Ching,Added to group,"verified=True path=from_record,refreshed_access_hash"
 5013378726,,iMobile Phone,3042105460,Sea,Added to group,"verified=True path=from_record,refreshed_access_hash"
@@ -316,7 +315,6 @@ user_id,username,group_name,group_id,member_label,status,full error message
 5292807871,,iMobile Phone Store,3060514178,Phanith,Added to group,"verified=True path=from_record,refreshed_access_hash"
 960436527,ThaiiGii,iMobile Phone Store,3060514178,ហេង (@ThaiiGii),Added to group,"verified=True path=from_record,refreshed_access_hash"
 1969777332,nonchalantfinalbosss,iMobile Phone Store,3060514178,Songheng (@nonchalantfinalbosss),Added to group,"verified=True path=from_record,refreshed_access_hash"
-912726832,Teysx,iMobile Phone Store,3060514178,Althea (@Teysx),Restricted,Invite failed: Too many requests (caused by InviteToChannelRequest)
 1052928515,BoNzus15,iMobile Phone Store,3060514178,Heng (@BoNzus15),Added to group,"verified=True path=from_record,refreshed_access_hash"
 6235918966,,iMobile Phone Store,3060514178,សំណាង រិទី្វ,Added to group,"verified=True path=from_record,refreshed_access_hash"
 1104061019,Randomdude1234t,iMobile Phone Store,3060514178,Bernard (@Randomdude1234t),Added to group,"verified=True path=from_record,refreshed_access_hash"
@@ -352,3 +350,61 @@ user_id,username,group_name,group_id,member_label,status,full error message
 435722451,Nay_OudomKhemarak,iMobile Phone Store,3060514178,Nay oudomkhemarak (@Nay_OudomKhemarak),Added to group,"verified=True path=from_record,refreshed_access_hash"
 5617144700,,iMobile Phone Store,3060514178,Pong,Added to group,"verified=True path=from_record,refreshed_access_hash"
 7573190353,,iMobile Phone Store,3060514178,Ba,Added to group,"verified=True path=from_record,refreshed_access_hash"
+6687421171,,iMobile Phone,3042105460,សេងហ័ង,Added to group,"verified=True path=from_record,refreshed_access_hash"
+6596414420,,iMobile Phone,3042105460,Ly Neang,Added to group,"verified=True path=from_record,refreshed_access_hash"
+7340791669,,iMobile Phone,3060514178,Nur,Added to group,"verified=True path=from_record,refreshed_access_hash"
+1221507298,nuth125,iMobile Phone,3060514178,Yav Chanuth (@nuth125),Added to group,verified=unknown path=resolved_username_retry
+685758942,MDY9899,iMobile Phone,3060514178,Mai (@MDY9899),Added to group,verified=unknown path=resolved_username_retry
+6687421171,,iMobile Phone,3060514178,សេងហ័ង,Added to group,"verified=True path=from_record,refreshed_access_hash"
+1291357616,,iMobile Phone,3042105460,Py,Added to group,"verified=True path=from_record,refreshed_access_hash"
+7340791669,,iMobile Phone,3042105460,Nur,Added to group,"verified=True path=from_record,refreshed_access_hash"
+1221507298,nuth125,iMobile Phone,3042105460,Yav Chanuth (@nuth125),Added to group,verified=unknown path=resolved_username_retry
+685758942,MDY9899,iMobile Phone,3042105460,Mai (@MDY9899),Added to group,verified=unknown path=resolved_username_retry
+978433445,sourdinaa,iMobile Phone,3042105460,Dna (@sourdinaa),Added to group,"verified=True path=from_record,refreshed_access_hash"
+6845437474,,iMobile Phone,3042105460,Hi,Added to group,"verified=True path=from_record,refreshed_access_hash"
+6028873523,heng_chhunleng,iMobile Phone,3042105460,Leng (@heng_chhunleng),Added to group,"verified=True path=from_record,refreshed_access_hash"
+960436527,ThaiiGii,iMobile Phone,3042105460,ហេង (@ThaiiGii),Added to group,"verified=True path=from_record,refreshed_access_hash"
+6287767196,dulvatey,iMobile Phone,3042105460,vatey (@dulvatey),Verification failed,"verified=False path=from_record,refreshed_access_hash"
+1969777332,nonchalantfinalbosss,iMobile Phone,3042105460,Songheng (@nonchalantfinalbosss),Added to group,"verified=True path=from_record,refreshed_access_hash"
+1291357616,,iMobile Phone,3060514178,Py,Added to group,"verified=True path=from_record,refreshed_access_hash"
+6287767196,dulvatey,iMobile Phone,3060514178,vatey (@dulvatey),Added to group,verified=unknown path=resolved_username_retry
+912726832,Teysx,iMobile Phone,3060514178,Althea (@Teysx),Added to group,verified=unknown path=resolved_username_retry
+809936599,Hengsey,iMobile Phone,3060514178,Sreng (@Hengsey),Added to group,verified=unknown path=resolved_username_retry
+1095677511,AstraZennn,iMobile Phone,3060514178,Rithysakkkk (@AstraZennn),Added to group,verified=unknown path=resolved_username_retry
+1367096077,vnac_V,iMobile Phone,3060514178,Nac (@vnac_V),Verification unknown,verified=unknown path=resolved_username_retry
+1018837489,makara21,iMobile Phone,3060514178,SM Makara (@makara21),Verification unknown,verified=unknown path=resolved_username_retry
+5792018084,Oeun_So_thana,iMobile Phone,3060514178,អឿន (@Oeun_So_thana),Verification failed,"verified=False path=from_record,refreshed_access_hash"
+538618045,chornayly,iMobile Phone,3060514178,Chornay (@chornayly),Verification unknown,verified=unknown path=resolved_username_retry
+5499699222,marioastr,iMobile Phone,3060514178,Sing (@marioastr),Verification unknown,verified=unknown path=resolved_username_retry
+7000883613,Lyhor_your_girl_forever,iMobile Phone,3060514178,Chheav (@Lyhor_your_girl_forever),Added to group,"verified=True path=from_record,refreshed_access_hash"
+1843925350,phallmakara,iMobile Phone,3060514178,PHALL (@phallmakara),Added to group,"verified=True path=from_record,refreshed_access_hash"
+301818798,Chhai_Senghong,iMobile Phone,3060514178,CHHAI (@Chhai_Senghong),Verification failed,"verified=False path=from_record,refreshed_access_hash"
+6664265177,MrWhite2626,iMobile Phone,3060514178,R’lin S. (@MrWhite2626),Verification unknown,verified=unknown path=resolved_username_retry
+1301874794,zeiirothoo777,iMobile Phone,3060514178,Ni (@zeiirothoo777),Verification unknown,verified=unknown path=resolved_username_retry
+902558076,Yuthhr,iMobile Phone,3060514178,yuth (@Yuthhr),Verification unknown,verified=unknown path=resolved_username_retry
+1051848391,Doun_Mengly,iMobile Phone,3060514178,Meng (@Doun_Mengly),Added to group,"verified=True path=from_record,refreshed_access_hash"
+1939612249,NGETRATANA,iMobile Phone,3060514178,Nget Rathana - (@NGETRATANA),Verification unknown,verified=unknown path=resolved_username_retry
+7159156087,therealsuysokim,iMobile Phone,3060514178,Suy (@therealsuysokim),Added to group,"verified=True path=from_record,refreshed_access_hash"
+2136263973,iam_poengleap,iMobile Phone,3060514178,"刘平,., (@iam_poengleap)",Added to group,"verified=True path=from_record,refreshed_access_hash"
+7495587910,nory752023,iMobile Phone,3060514178,阿芳🎀AFang🎀【香香组】🎀 (@nory752023),Added to group,"verified=True path=from_record,refreshed_access_hash"
+7265571501,reachkmgchlat,iMobile Phone,3060514178,Thun rithy (@reachkmgchlat),Added to group,"verified=True path=from_record,refreshed_access_hash"
+5385240527,Nnangouk,iMobile Phone,3060514178,Nang (@Nnangouk),Added to group,"verified=True path=from_record,refreshed_access_hash"
+1454263012,zermen,iMobile Phone,3060514178,恒河 (@zermen),Verification unknown,verified=unknown path=resolved_username_retry
+961122818,socheata7,iMobile Phone,3060514178,Yi Fang (@socheata7),Added to group,"verified=True path=from_record,refreshed_access_hash"
+774154121,NineeSeptember,iMobile Phone,3060514178,Ratanaa. (@NineeSeptember),Added to group,"verified=True path=from_record,refreshed_access_hash"
+6173157518,pitou225,iMobile Phone,3060514178,Yin (@pitou225),Added to group,"verified=True path=from_record,refreshed_access_hash"
+1362673452,NY_SINET,iMobile Phone,3060514178,𝐍𝐘 𝐒𝐈𝐍𝐄𝐓 (@NY_SINET),Added to group,"verified=True path=from_record,refreshed_access_hash"
+6024671419,kohogz,iMobile Phone,3060514178,Heng (@kohogz),Added to group,"verified=True path=from_record,refreshed_access_hash"
+6403948766,Bing0007,iMobile Phone,3060514178,🐍Snake 🐍 (@Bing0007),Added to group,"verified=True path=from_record,refreshed_access_hash"
+1244254778,So_norakomaraphoitt,iMobile Phone,3060514178,សូ នរ៉ា កោម៉ារភទ្ទ (@So_norakomaraphoitt),Added to group,"verified=True path=from_record,refreshed_access_hash"
+7894062484,peapsmoss,iMobile Phone,3060514178,Tun (@peapsmoss),Added to group,"verified=True path=from_record,refreshed_access_hash"
+821617208,Pipheak_27,iMobile Phone,3060514178,Pipheak (@Pipheak_27),Added to group,"verified=True path=from_record,refreshed_access_hash"
+5478985172,bili19999,iMobile Phone,3060514178,Heng (@bili19999),Added to group,"verified=True path=from_record,refreshed_access_hash"
+5216098666,yeanchea77,iMobile Phone,3060514178,Chea (@yeanchea77),Added to group,"verified=True path=from_record,refreshed_access_hash"
+1979860241,,iMobile Phone,3060514178,Zerm,Skipped (not mutual),"Invalid object ID for a user. Make sure to pass the right types, for instance making sure that the request is designed for users or otherwise look for a different one more suited (caused by InviteToChannelRequest)"
+1058658927,,iMobile Phone,3060514178,Chivorn Vann,Skipped (not mutual),"Invalid object ID for a user. Make sure to pass the right types, for instance making sure that the request is designed for users or otherwise look for a different one more suited (caused by InviteToChannelRequest)"
+6631416099,,iMobile Phone,3060514178,គង់,Added to group,"verified=True path=from_record,refreshed_access_hash"
+7773554497,,iMobile Phone,3060514178,V,Skipped (not mutual),"Invalid object ID for a user. Make sure to pass the right types, for instance making sure that the request is designed for users or otherwise look for a different one more suited (caused by InviteToChannelRequest)"
+6018812635,,iMobile Phone,3060514178,ឈឿន,Added to group,"verified=True path=from_record,refreshed_access_hash"
+6570978607,benben_1736,iMobile Phone,3060514178,笨笨 (@benben_1736),Skipped (not mutual),"Invalid object ID for a user. Make sure to pass the right types, for instance making sure that the request is designed for users or otherwise look for a different one more suited (caused by InviteToChannelRequest)"
+8112372420,,iMobile Phone,3060514178,Sean,Verification failed,"verified=False path=from_record,refreshed_access_hash"

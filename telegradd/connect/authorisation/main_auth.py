@@ -252,7 +252,10 @@ def delete_accounts():
 def remove_from_restriction():
     """Clear the Restrictions flag for one or all accounts."""
     Database().view_all(admin=False)
-    choice = input('Enter number of an account to clear restriction (all - clear all): ').strip().lower()
+    choice = input('Enter number of an account to clear restriction (all - clear all, ranges like 2-5, or specific space-separated like 2 5 14): ').strip().lower()
+    
+    selected_accounts = []
+    
     if choice == 'all':
         rows = Database().get_all(('all',))
         if not rows:
@@ -264,20 +267,53 @@ def remove_from_restriction():
             except Exception as e:
                 print(f'Failed to clear restriction for id={row[0]}: {e}')
         print('Restrictions cleared for all accounts.')
-    elif choice.isdigit():
-        idx = int(choice)
-        rows = Database().get_all((idx,))
-        if not rows:
-            print('No account found with that number.')
+        return
+    
+    # Parse input for ranges and individual selections
+    tokens = [t for t in choice.split(' ') if t]
+    for token in tokens:
+        if '-' in token:
+            # Handle range like "2-5"
+            try:
+                start, end = token.split('-', 1)
+                start_num = int(start.strip())
+                end_num = int(end.strip())
+                if start_num <= end_num:
+                    selected_accounts.extend(range(start_num, end_num + 1))
+                else:
+                    selected_accounts.extend(range(end_num, start_num + 1))
+            except ValueError:
+                print(f'Invalid range format: {token}')
+                return
+        elif token.isdigit():
+            # Handle individual number
+            selected_accounts.append(int(token))
+        else:
+            print(f'Invalid input: {token}')
             return
+    
+    if not selected_accounts:
+        print('No valid account numbers provided.')
+        return
+    
+    # Remove duplicates and sort
+    selected_accounts = sorted(set(selected_accounts))
+    
+    # Clear restrictions for selected accounts
+    cleared_count = 0
+    for account_num in selected_accounts:
+        rows = Database().get_all((account_num,))
+        if not rows:
+            print(f'No account found with number {account_num}.')
+            continue
         try:
             Database().update_restriction('False', num=rows[0][0])
-            print(f'Restriction cleared for account id={rows[0][0]}')
+            print(f'Restriction cleared for account #{account_num} (id={rows[0][0]})')
+            cleared_count += 1
         except Exception as e:
-            print(f'Failed to clear restriction for id={rows[0][0]}: {e}')
-    else:
-        print('Wrong input...')
-        return
+            print(f'Failed to clear restriction for account #{account_num} (id={rows[0][0]}): {e}')
+    
+    print(f'Restrictions cleared for {cleared_count} account(s).')
 
 
 def add_to_restriction():
