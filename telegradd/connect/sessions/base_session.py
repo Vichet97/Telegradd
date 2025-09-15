@@ -10,8 +10,9 @@ dirs = str(dir_path).split('\\')
 @dataclass
 class Session(ABC):
     EXTENSION = '.session'
-    FULL_PATH = str(pathlib.Path(__file__).parents[3])
-    _telethon_base_path = '\\'.join ([FULL_PATH, 'telegradd', 'connect', 'sessions', 'session_store'])
+    # Use pathlib for cross-platform paths
+    FULL_PATH = pathlib.Path(__file__).parents[3]
+    _telethon_base_path = FULL_PATH / 'telegradd' / 'connect' / 'sessions' / 'session_store'
     _telethon_session = None
     _conn = None
 
@@ -20,7 +21,8 @@ class Session(ABC):
         return self._telethon_session
 
     def set_telethon_session(self, value):  # set with phone number
-        self._telethon_session = '\\'.join((self._telethon_base_path, f'{value}{self.EXTENSION}'))
+        # Ensure stored path is a string and cross-platform
+        self._telethon_session = str(self._telethon_base_path / f'{value}{self.EXTENSION}')
 
     def _cursor(self, filename):  # cursor returned
         if self._conn is None:

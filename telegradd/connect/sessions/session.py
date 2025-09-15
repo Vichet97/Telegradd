@@ -155,9 +155,10 @@ class Telethon_session(Session): # moved sessions to session store
         super().__init__()
 
     def to_telethon_session(self):
-        telethon_session = ('\\').join((self.FULL_PATH, 'sessions', 'telethon_sessions', f'{self._telethon_name}{self.EXTENSION}'))
+        # Build source path using pathlib for cross-platform support
+        telethon_session = pathlib.Path(self.FULL_PATH) / 'sessions' / 'telethon_sessions' / f'{self._telethon_name}{self.EXTENSION}'
         self.set_telethon_session(self._telethon_name)
-        shutil.move(telethon_session, self.telethon_session)
+        shutil.move(str(telethon_session), self.telethon_session)
 
 
 class Json_sessions(Session):
@@ -167,15 +168,14 @@ class Json_sessions(Session):
         super().__init__()
 
     def to_telethon_session(self):
-        session = ('\\').join ((self.FULL_PATH, 'sessions', 'sessions_json', f'{self.session_name}{self.EXTENSION}'))
+        session = pathlib.Path(self.FULL_PATH) / 'sessions' / 'sessions_json' / f'{self.session_name}{self.EXTENSION}'
         self.set_telethon_session (self.session_name)
-        shutil.move (session, self.telethon_session)
+        shutil.move (str(session), self.telethon_session)
 
     def js_dict(self) -> dict:
-        js_file = ('\\').join ((self.FULL_PATH, 'sessions', 'sessions_json', f'{self.session_name}{self.JS_EXTENSION}'))
-        with open (js_file) as f:
-            line = json.loads(f.readlines ()[0].rstrip ('\n'))
-        return line
+        js_file = pathlib.Path(self.FULL_PATH) / 'sessions' / 'sessions_json' / f'{self.session_name}{self.JS_EXTENSION}'
+        with open(js_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
 
     @property
     def done_session(self):
@@ -189,7 +189,7 @@ class Tdata_session(Session):
     def __init__(self, session_name: str):
         super().__init__()
         self._session_name = session_name.lstrip('+')
-        self._TDATA_path = pathlib.Path (__file__).parents[3].joinpath('sessions', 'TData', session_name, 'tdata')
+        self._TDATA_path = pathlib.Path(__file__).parents[3] / 'sessions' / 'TData' / session_name / 'tdata'
 
         self.set_telethon_session(self._session_name)
 

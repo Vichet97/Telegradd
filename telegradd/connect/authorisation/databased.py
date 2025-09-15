@@ -3,6 +3,8 @@ import datetime
 from pathlib import Path
 import sqlite3
 import os
+import json
+import shutil
 
 from dateutil.relativedelta import relativedelta
 
@@ -114,6 +116,160 @@ class Database:
         elif num is not None:
             self._updater_by_num(self.API_ID, ids, num)
 
+    def _get_by_phone(self, phone: str):
+        """Internal helper to fetch a row by Phone. Returns first row tuple or None."""
+        self._execute(self.TABLE)
+        get = self._execute("""SELECT * FROM Accounts
+                               WHERE Phone == ?""", phone)
+        if get:
+            return get[0]
+        return None
+
+    def sync_sessions_json(self, only_name: str | None = None, dry_run: bool = True, verbose: bool = True):
+        """
+        Synchronize fields in Accounts DB from sessions/sessions_json/*.json.
+
+        - Maps: Api_id <- app_id, Api_hash <- app_hash,
+                System <- f"{device}:{sdk}:{app_version}", Password <- twoFA.
+        - Matches records primarily by Name (basename of json), then by Phone from json if Name not found.
+        - If dry_run=True, prints planned changes without applying; if False, makes a backup and applies.
+        - only_name: if provided, limit sync to a single account (match against Name or Phone).
+
+        Returns a summary dict with counts.
+        """
+        js_dir = Path(Path(pathlib.Path(__file__)).parents[3], 'sessions', 'sessions_json')
+        if not js_dir.exists():
+            if verbose:
+                print(f"sessions_json directory not found: {js_dir}")
+            return {"processed": 0, "updated": 0, "skipped": 0, "errors": 1}
+
+        # Collect json files
+        json_files = [p for p in js_dir.iterdir() if p.is_file() and p.suffix.lower() == '.json']
+        processed = updated = skipped = errors = 0
+        planned_changes = []
+
+        # Optionally create a backup before applying any changes
+        backup_path = None
+        if not dry_run:
+            try:
+                ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                db_file = self.FILENAME
+                backup_path = db_file.with_name(db_file.stem + f'.{ts}.bak')
+                shutil.copy2(db_file, backup_path)
+                if verbose:
+                    print(f"Backup created: {backup_path}")
+            except Exception as e:
+                errors += 1
+                print(f"Failed to create backup: {e}")
+                return {"processed": processed, "updated": updated, "skipped": skipped, "errors": errors}
+
+        for jf in json_files:
+            name = jf.stem
+            if only_name is not None and name != str(only_name) and jf.stem != str(only_name):
+                # If only_name is provided and doesn't match by name, will check by phone after loading
+                pass
+            try:
+                with open(jf, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception as e:
+                errors += 1
+                if verbose:
+                    print(f"Failed to load {jf.name}: {e}")
+                continue
+
+            phone = str(data.get('phone', '') or data.get('session_file', ''))
+            # If only filter provided and doesn't match either name or phone, skip
+            if only_name is not None and (str(only_name) != name and str(only_name) != phone):
+                continue
+
+            processed += 1
+
+            try:
+                new_id = int(data['app_id']) if 'app_id' in data and data['app_id'] is not None else None
+                new_hash = data.get('app_hash')
+                device = data.get('device')
+                sdk = data.get('sdk')
+                app_version = data.get('app_version')
+                new_system = f"{device}:{sdk}:{app_version}" if device and sdk and app_version else None
+                new_password = data.get('twoFA')
+            except Exception as e:
+                errors += 1
+                if verbose:
+                    print(f"Malformed fields in {jf.name}: {e}")
+                continue
+
+            # Fetch existing row by Name first
+            existing_rows = self.get_by_name(name)
+            row = existing_rows[0] if existing_rows else None
+            matched_by = 'Name'
+            if not row and phone:
+                row = self._get_by_phone(phone)
+                matched_by = 'Phone'
+
+            if not row:
+                skipped += 1
+                if verbose:
+                    print(f"No DB row found for {name} (phone={phone}). Skipping.")
+                continue
+
+            # row layout: (Number, Name, Api_id, Api_hash, System, Proxy, Phone, Password, Restrictions)
+            current = {
+                'Api_id': row[2],
+                'Api_hash': row[3],
+                'System': row[4],
+                'Password': row[7],
+                'Name': row[1],
+                'Phone': row[6],
+            }
+
+            diffs = {}
+            if new_id is not None and current['Api_id'] != new_id:
+                diffs['Api_id'] = (current['Api_id'], new_id)
+            if new_hash and current['Api_hash'] != new_hash:
+                diffs['Api_hash'] = (current['Api_hash'], new_hash)
+            if new_system and current['System'] != new_system:
+                diffs['System'] = (current['System'], new_system)
+            if new_password is not None and current['Password'] != new_password:
+                diffs['Password'] = (current['Password'], new_password)
+
+            if not diffs:
+                skipped += 1
+                if verbose:
+                    print(f"Up-to-date: {current['Name']} (matched by {matched_by}).")
+                continue
+
+            planned_changes.append((current['Name'], matched_by, diffs))
+
+            if verbose:
+                print(f"Will update {current['Name']} (matched by {matched_by}):")
+                for k, (old, new) in diffs.items():
+                    print(f"  - {k}: {old} -> {new}")
+
+            if not dry_run:
+                # Apply updates by Name when possible for consistency
+                target_name = current['Name']
+                try:
+                    if 'Api_id' in diffs:
+                        self.update_id(diffs['Api_id'][1], name=target_name)
+                    if 'Api_hash' in diffs:
+                        self.update_hash(diffs['Api_hash'][1], name=target_name)
+                    if 'System' in diffs:
+                        self.update_system(diffs['System'][1], name=target_name)
+                    if 'Password' in diffs:
+                        self.update_password(diffs['Password'][1], name=target_name)
+                    updated += 1
+                except Exception as e:
+                    errors += 1
+                    print(f"Failed to update {target_name}: {e}")
+
+        if verbose:
+            print(f"Sync complete. processed={processed}, updated={updated}, skipped={skipped}, errors={errors}")
+            if dry_run:
+                print("Dry run: no changes were applied. Use --apply to update the DB.")
+            elif backup_path:
+                print(f"Backup file: {backup_path}")
+
+        return {"processed": processed, "updated": updated, "skipped": skipped, "errors": errors}
 
     def update_restriction(self, restriction, num=None, name=None, phone=None):
         if name is not None:
@@ -130,10 +286,14 @@ class Database:
             else:
                 try:
                     res = data[8].split (':')
-                    pass_3_days = datetime.datetime (int (res[1]), int (res[2].lstrip ('0')), int (res[3].lstrip ('0')),
-                                                     int (res[4].lstrip ('0')) if int(res[4]) != 00 else int(res[4])) \
-                                  + relativedelta (days=3) < datetime.datetime.now ()
-                    if pass_3_days:
+                    # Safely parse components, handling leading zeros and empty strings
+                    year = int(res[1])
+                    month = int(res[2].lstrip('0') or '0')
+                    day = int(res[3].lstrip('0') or '0')
+                    hour = int(res[4].lstrip('0') or '0')
+                    pass_time = datetime.datetime(year, month, day, hour)
+                    pass_24_hours = pass_time + relativedelta(hours=24) < datetime.datetime.now()
+                    if pass_24_hours:
                         self.update_restriction ('False', num=data[0])
                         print(f'Restriction updated for {data[1]}')
                 except IndexError:
@@ -341,7 +501,7 @@ class Auth:
             if len (files) % int (proxy_request) == 0:
                 self._proxy = input (f'Enter {int (per)} prox(y/ies) or press enter and ad them to proxy.txt: ')
             else:
-                self._proxy = input (f'Enter {int (per) + 1} prox(y/ies) or press enter and ad them to proxy.txt: ')
+                self._proxy = input (f'Enter {int (per)  1} prox(y/ies) or press enter and ad them to proxy.txt: ')
 """
     def manual_adder(self):
         add_another = 'y'
@@ -352,7 +512,7 @@ class Auth:
                 print ('api_id must be integer')
                 api_id = int (input ('Enter api_id: '))
             api_hash = input ('Enter api_hash: ')
-            phone = input ('Enter phone number with country code: ').lstrip ('+')
+            phone = input ('Enter phone number with country code: ').lstrip ('')
             proxy = ''
             if self._use_proxy:
                 proxy = input ("Enter proxy for this account, press enter if u want to use this account without proxy.\n"
@@ -425,6 +585,25 @@ class Auth:
             self.session_manual_proxy()
         elif self._manual is False:
             self.divided_proxy()
+
+
+
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Utilities for Accounts DB")
+    parser.add_argument("--sync-json", action="store_true", help="Sync fields from sessions_json to Accounts DB")
+    parser.add_argument("--only", type=str, default=None, help="Limit sync to a specific Name or Phone")
+    parser.add_argument("--apply", action="store_true", help="Apply changes (disable dry-run)")
+    args = parser.parse_args()
+
+    if args.sync_json:
+        db = Database()
+        db.sync_sessions_json(only_name=args.only, dry_run=not args.apply, verbose=True)
+        db.close()
+    else:
+        parser.print_help()
 
 
 

@@ -11,16 +11,57 @@ from telegradd.adder.adder import ADDER, auth_for_adding
 from telegradd.utils import split_ac
 
 
-async def join_groups(clients: typing.List, group_link: str):
-    join_group = [ADDER (cl).join_group (group_link) for cl in clients]
-    res = await asyncio.gather (*join_group)
-    while False in res:
-        if None in res:
-            break
-        group_link = input ('Enter group link without @, like "group_link" or "https://t.me/group_link": ')
-        join_group = [ADDER (cl).join_group (group_link) for cl in clients]
-        res = await asyncio.gather (*join_group)
-    return group_link
+# Normalize a user-provided entity string into a form acceptable by ADDER.join_group
+# - Strips whitespace and quotes/backticks
+# - Converts @username to username
+# - Converts t.me/, http://t.me/ to https://t.me/
+# - Leaves bare usernames as-is (ADDER.join_group will prefix https://t.me/)
+def _normalize_entity(entity: str) -> str | None:
+    if not entity:
+        return None
+    e = entity.strip().strip('`"\'')
+    if not e:
+        return None
+    if e.startswith('@'):
+        return e[1:]
+    if e.startswith('http://t.me/'):
+        return 'https://t.me/' + e[len('http://t.me/'):]
+    if e.startswith('https://t.me/'):
+        return e
+    if e.startswith('t.me/'):
+        return 'https://t.me/' + e[len('t.me/'):]
+    return e
+
+
+async def join_groups(clients: typing.List, group_links):
+    # Accept either a single string or an iterable of strings
+    if isinstance(group_links, str):
+        group_links = [_normalize_entity(group_links)]
+    else:
+        group_links = [_normalize_entity(gl) for gl in group_links]
+    # Drop any Nones/empties after normalization
+    group_links = [gl for gl in group_links if gl]
+
+    last_link = None
+    for link in group_links:
+        last_link = link
+        join_group_tasks = [ADDER(cl).join_group(link) for cl in clients]
+        res = await asyncio.gather(*join_group_tasks)
+        # Keep legacy retry prompt only when a single link was provided and all attempts failed with False
+        if len(group_links) == 1:
+            while False in res:
+                if None in res:
+                    break
+                new_input = input('Enter group link without @, like "group_link" or "https://t.me/group_link": ')
+                link = _normalize_entity(new_input)
+                if not link:
+                    break
+                join_group_tasks = [ADDER(cl).join_group(link) for cl in clients]
+                res = await asyncio.gather(*join_group_tasks)
+            return link
+    # Return the last processed link for compatibility
+    return last_link
+
 
 def already_skimmed():
     skimmed = input ('Users already skimmed (y/n): ').lower ()
@@ -155,17 +196,34 @@ async def join_group():# -> TelegramClient|bool:
     mode = input ('Use admin mode (y/n)?: ')
     admin = True if mode == 'y' else False
     Database ().view_all (admin=True) if admin else Database ().view_all ()
-    num = input('Choose accounts. Enter digits via spaces (all - to use all): ').lower().strip(' ').split(' ')
-    group_link = input('Enter group link to join: ')
-    if num[0] == 'all':
+    raw = input('Choose accounts. Enter digits via spaces (all - to use all, ranges like 2-5 are supported): ').lower().strip(' ')
+    tokens = [t for t in raw.split(' ') if t]
+    group_links_raw = input('Enter one or multiple group links/usernames to join (comma-separated): ')
+    # Split by comma and keep non-empty trimmed tokens
+    group_links_list = [t.strip() for t in group_links_raw.split(',') if t.strip()]
+    if tokens and tokens[0] == 'all':
         clients = await TELEGRADD_client ().clients (restriction=False)
-        await join_groups(clients, group_link)
-    elif num[0].isdigit():
-        clients = await TELEGRADD_client (tuple(int(i) for i in num)).clients (restriction=False)
-        await join_groups (clients, group_link)
+        await join_groups(clients, group_links_list)
     else:
-        print('U choose wrong options, try again')
-        return
+        selected = []
+        for t in tokens:
+            if '-' in t:
+                a, b = (part.strip() for part in t.split('-', 1))
+                if a.isdigit() and b.isdigit():
+                    start, end = int(a), int(b)
+                    if start <= end:
+                        selected.extend(range(start, end + 1))
+                    else:
+                        selected.extend(range(end, start + 1))
+            elif t.isdigit():
+                selected.append(int(t))
+        selected = sorted(set(selected))
+        if selected:
+            clients = await TELEGRADD_client (tuple(selected)).clients (restriction=False)
+            await join_groups (clients, group_links_list)
+        else:
+            print('U choose wrong options, try again')
+            return
 
 if __name__ == '__main__':
     asyncio.run(main_adder())
