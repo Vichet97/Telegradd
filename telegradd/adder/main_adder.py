@@ -2,6 +2,7 @@ import logging
 import asyncio
 import os
 import typing
+import random
 
 from telethon import events
 
@@ -33,7 +34,7 @@ def _normalize_entity(entity: str) -> str | None:
     return e
 
 
-async def join_groups(clients: typing.List, group_links):
+async def join_groups(clients: typing.List, group_links, *, safe_delay: bool = True, per_account_delay_range: tuple[float, float] = (5.0, 12.0), max_none_retries: int = 2) -> typing.Optional[str]:
     # Accept either a single string or an iterable of strings
     if isinstance(group_links, str):
         group_links = [_normalize_entity(group_links)]
@@ -45,19 +46,45 @@ async def join_groups(clients: typing.List, group_links):
     last_link = None
     for link in group_links:
         last_link = link
-        join_group_tasks = [ADDER(cl).join_group(link) for cl in clients]
-        res = await asyncio.gather(*join_group_tasks)
+        results: list[typing.Optional[bool]] = []
+        if safe_delay:
+            # Sequential, with jitter between accounts and bounded retries on None (transient)
+            for idx, cl in enumerate(clients, start=1):
+                res = await ADDER(cl).join_group(link)
+                # Retry a few times only for None results (unknown/transient), with exponential backoff
+                if res is None and max_none_retries > 0:
+                    backoff = random.uniform(6.0, 10.0)
+                    for attempt in range(1, max_none_retries + 1):
+                        await asyncio.sleep(backoff)
+                        res = await ADDER(cl).join_group(link)
+                        if res is not None:
+                            break
+                        backoff *= 1.7 + random.uniform(0.0, 0.6)
+                results.append(res)
+                # Jitter delay between accounts to avoid bursts
+                await asyncio.sleep(random.uniform(*per_account_delay_range))
+        else:
+            # Legacy behavior: fan-out in parallel
+            join_group_tasks = [ADDER(cl).join_group(link) for cl in clients]
+            results = await asyncio.gather(*join_group_tasks)
         # Keep legacy retry prompt only when a single link was provided and all attempts failed with False
         if len(group_links) == 1:
-            while False in res:
-                if None in res:
+            while False in results:
+                if None in results:
                     break
                 new_input = input('Enter group link without @, like "group_link" or "https://t.me/group_link": ')
                 link = _normalize_entity(new_input)
                 if not link:
                     break
-                join_group_tasks = [ADDER(cl).join_group(link) for cl in clients]
-                res = await asyncio.gather(*join_group_tasks)
+                if safe_delay:
+                    results = []
+                    for cl in clients:
+                        r = await ADDER(cl).join_group(link)
+                        results.append(r)
+                        await asyncio.sleep(random.uniform(*per_account_delay_range))
+                else:
+                    join_group_tasks = [ADDER(cl).join_group(link) for cl in clients]
+                    results = await asyncio.gather(*join_group_tasks)
             return link
     # Return the last processed link for compatibility
     return last_link
@@ -118,7 +145,7 @@ async def main_adder(how_to_add='username'):
                 for client in get_batch_acc (batch_size=5, clients=client_list):
                     await asyncio.gather (*client, return_exceptions=True)
             else:
-                await asyncio.gather (*client_list, return_exceptions=True)
+                await asyncio.gather (*client, return_exceptions=True)
 
         else:
             group_lin = await join_groups(clients, how_to_act)  # join group from which users were parsed, link returned
@@ -133,7 +160,7 @@ async def main_adder(how_to_add='username'):
                 for client in get_batch_acc (batch_size=5, clients=client_list):
                     await asyncio.gather (*client, return_exceptions=True)
             else:
-                await asyncio.gather (*client_list, return_exceptions=True)
+                await asyncio.gather (*client, return_exceptions=True)
 
     elif how_to_add == 'username':
         num = 0

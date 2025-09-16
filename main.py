@@ -694,7 +694,7 @@ async def _invite_one(client, target_entity, user_rec, source_group_id=None, ver
                 channel = InputPeerChannel(target_entity.id, getattr(target_entity, 'access_hash', None))
                 await client(InviteToChannelRequest(channel, [iu]))
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(10)
         try:
             await do_invite(input_user)
             details = ''
