@@ -26,6 +26,34 @@ class Database:
                 Password TEXT,
                 Restrictions TEXT
                 )"""
+    # Add table for per-day counters (Added/Remaining per account)
+    DAILY_TABLE = """CREATE TABLE IF NOT EXISTS DailyStats (
+                Phone TEXT NOT NULL,
+                Date TEXT NOT NULL,
+                Added INTEGER NOT NULL,
+                Remaining INTEGER NOT NULL,
+                PRIMARY KEY (Phone, Date)
+                )"""
+
+    # Per-target variant (scoped by adder account + date + target group/channel id)
+    TARGET_DAILY_TABLE = """CREATE TABLE IF NOT EXISTS TargetDailyStats (
+                Phone TEXT NOT NULL,
+                Date TEXT NOT NULL,
+                TargetId INTEGER NOT NULL,
+                Added INTEGER NOT NULL,
+                Remaining INTEGER NOT NULL,
+                PRIMARY KEY (Phone, Date, TargetId)
+                )"""
+
+    # Log of members successfully added on a given day per adder account and target
+    DAILY_ADDS_TABLE = """CREATE TABLE IF NOT EXISTS DailyAddedMembers (
+                Phone TEXT NOT NULL,
+                Date TEXT NOT NULL,
+                TargetId INTEGER NOT NULL,
+                UserId INTEGER NOT NULL,
+                Username TEXT,
+                PRIMARY KEY (Phone, Date, TargetId, UserId)
+                )"""
 
     SYSTEM = 'System'
     PROXY = 'Proxy'
@@ -416,6 +444,165 @@ class Database:
             return cur.execute (executable_str, values).fetchall()
         finally:
             cur.close ()
+
+    # --- DailyStats helpers ---
+    def _ensure_daily_table(self):
+        """Ensure DailyStats table exists."""
+        try:
+            self._execute(self.DAILY_TABLE)
+        except Exception:
+            # In case _execute cursor lifecycle interferes, fallback to direct connection
+            conn = sqlite3.connect(self.FILENAME, check_same_thread=False)
+            try:
+                conn.execute(self.DAILY_TABLE)
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_daily_stats(self, phone: str, date: str | None = None):
+        """Return tuple (Added, Remaining) for given phone and date (YYYY-MM-DD), or None if not found."""
+        if not phone:
+            return None
+        if date is None:
+            date = datetime.datetime.now().strftime('%Y-%m-%d')
+        self._ensure_daily_table()
+        rows = self._execute(
+            """SELECT Added, Remaining FROM DailyStats WHERE Phone == ? AND Date == ?""",
+            phone, date
+        )
+        if rows:
+            try:
+                return int(rows[0][0]), int(rows[0][1])
+            except Exception:
+                return rows[0][0], rows[0][1]
+        return None
+
+    def upsert_daily_stats(self, phone: str, date: str, added: int, remaining: int):
+        """Insert or replace daily stats for phone+date."""
+        if not phone or not date:
+            return
+        self._ensure_daily_table()
+        conn = sqlite3.connect(self.FILENAME, check_same_thread=False)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                INSERT INTO DailyStats (Phone, Date, Added, Remaining)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(Phone, Date) DO UPDATE SET
+                    Added=excluded.Added,
+                    Remaining=excluded.Remaining
+                """,
+                (phone, date, int(added), int(remaining))
+            )
+        finally:
+            conn.commit()
+            conn.close()
+
+    def increment_daily_counters(self, phone: str, date: str | None = None, added_inc: int = 1, remaining: int | None = None):
+        """Increment Added by added_inc and optionally set Remaining for phone+date."""
+        if not phone:
+            return
+        if date is None:
+            date = datetime.datetime.now().strftime('%Y-%m-%d')
+        self._ensure_daily_table()
+        current = self.get_daily_stats(phone, date)
+        if current is None:
+            init_remaining = int(remaining) if remaining is not None else 0
+            self.upsert_daily_stats(phone, date, int(added_inc), init_remaining)
+            return
+        cur_added, cur_remaining = current
+        new_added = int(cur_added) + int(added_inc)
+        new_remaining = int(remaining) if remaining is not None else int(cur_remaining)
+        self.upsert_daily_stats(phone, date, new_added, new_remaining)
+
+    # --- TargetDailyStats and DailyAddedMembers helpers ---
+    def _ensure_target_tables(self):
+        try:
+            self._execute(self.TARGET_DAILY_TABLE)
+            self._execute(self.DAILY_ADDS_TABLE)
+        except Exception:
+            conn = sqlite3.connect(self.FILENAME, check_same_thread=False)
+            try:
+                conn.execute(self.TARGET_DAILY_TABLE)
+                conn.execute(self.DAILY_ADDS_TABLE)
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_target_daily_stats(self, phone: str, target_id: int, date: str | None = None):
+        if not phone or target_id is None:
+            return None
+        if date is None:
+            date = datetime.datetime.now().strftime('%Y-%m-%d')
+        self._ensure_target_tables()
+        rows = self._execute(
+            """SELECT Added, Remaining FROM TargetDailyStats WHERE Phone == ? AND Date == ? AND TargetId == ?""",
+            phone, date, int(target_id)
+        )
+        if rows:
+            try:
+                return int(rows[0][0]), int(rows[0][1])
+            except Exception:
+                return rows[0][0], rows[0][1]
+        return None
+
+    def upsert_target_daily_stats(self, phone: str, target_id: int, date: str, added: int, remaining: int):
+        if not phone or not date or target_id is None:
+            return
+        self._ensure_target_tables()
+        conn = sqlite3.connect(self.FILENAME, check_same_thread=False)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                INSERT INTO TargetDailyStats (Phone, Date, TargetId, Added, Remaining)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(Phone, Date, TargetId) DO UPDATE SET
+                    Added=excluded.Added,
+                    Remaining=excluded.Remaining
+                """,
+                (phone, date, int(target_id), int(added), int(remaining))
+            )
+        finally:
+            conn.commit()
+            conn.close()
+
+    def increment_target_daily_counters(self, phone: str, target_id: int, date: str | None = None, added_inc: int = 1, remaining: int | None = None):
+        if not phone or target_id is None:
+            return
+        if date is None:
+            date = datetime.datetime.now().strftime('%Y-%m-%d')
+        self._ensure_target_tables()
+        current = self.get_target_daily_stats(phone, target_id, date)
+        if current is None:
+            init_remaining = int(remaining) if remaining is not None else 0
+            self.upsert_target_daily_stats(phone, target_id, date, int(added_inc), init_remaining)
+            return
+        cur_added, cur_remaining = current
+        new_added = int(cur_added) + int(added_inc)
+        new_remaining = int(remaining) if remaining is not None else int(cur_remaining)
+        self.upsert_target_daily_stats(phone, target_id, date, new_added, new_remaining)
+
+    def log_daily_added_member(self, phone: str, target_id: int, user_id: int, username: str | None, date: str | None = None):
+        if not phone or target_id is None or user_id is None:
+            return
+        if date is None:
+            date = datetime.datetime.now().strftime('%Y-%m-%d')
+        self._ensure_target_tables()
+        conn = sqlite3.connect(self.FILENAME, check_same_thread=False)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO DailyAddedMembers (Phone, Date, TargetId, UserId, Username)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (phone, date, int(target_id), int(user_id), username)
+            )
+        finally:
+            conn.commit()
+            conn.close()
 
     def close(self):
         # closes connection and set conn to none

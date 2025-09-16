@@ -518,6 +518,25 @@ async def _fetch_source_members(client, group_id, limit=None):
     return members
 
 
+# Helper: prefetch a user's InputPeerUser by hitting GetParticipantRequest to warm cache
+async def _prefetch_user_from_source(client, source_group_id, user_id):
+    await _ensure_connected(client)
+    try:
+        # Warm up the session cache with participant info; ignore failures
+        await client(GetParticipantRequest(source_group_id, int(user_id)))
+    except Exception:
+        pass
+    try:
+        ip = await client.get_input_entity(int(user_id))
+        uid = getattr(ip, 'user_id', None)
+        uhash = getattr(ip, 'access_hash', None)
+        if uid is not None and uhash is not None:
+            return InputPeerUser(int(uid), int(uhash))
+    except Exception:
+        return None
+    return None
+
+
 def _format_member_label(rec: dict) -> str:
     name = (rec.get('first_name') or '').strip()
     username = rec.get('username')
@@ -608,30 +627,25 @@ async def _resolve_target_channel(client, target_choice):
 
 # Helper: add single user with error handling; returns True on success, False on non-countable failure,
 # raises on flood/restriction-worthy errors
-async def _invite_one(client, target_entity, user_rec, verify=True, verbose=False, allow_contact_fallback=True):
+async def _invite_one(client, target_entity, user_rec, source_group_id=None, verify=True, verbose=False, allow_contact_fallback=True):
     await _ensure_connected(client)
     try:
         # Prefer using access_hash captured from source to avoid cross-session resolution issues
         input_user = None
         resolution_steps = []  # track how we resolved InputPeerUser (for logging)
-        if user_rec.get('access_hash'):
+        # Attempt prefetch via source group to warm cache and get InputPeerUser
+        if source_group_id and user_rec.get('user_id'):
             try:
-                input_user = InputPeerUser(int(user_rec['user_id']), int(user_rec['access_hash']))
-                resolution_steps.append('from_record')
+                pref = await _prefetch_user_from_source(client, source_group_id, int(user_rec['user_id']))
+                if pref:
+                    input_user = pref
+                    resolution_steps.append('prefetched_from_source')
             except Exception:
-                input_user = None
-        if input_user is None and user_rec.get('username'):
-            try:
-                usr_ent = await client.get_entity(user_rec['username'])
-                input_user = InputPeerUser(usr_ent.id, usr_ent.access_hash)
-                resolution_steps.append('resolved_username')
-            except Exception:
-                input_user = None
+                pass
         if input_user is None:
-            # Last resort: try to derive InputPeerUser via get_input_entity
+            # Prefer session-local resolution first to avoid cross-session hash issues
             try:
                 ip = await client.get_input_entity(int(user_rec['user_id']))
-                # ip may be InputPeerUser with fields user_id/access_hash
                 uid = getattr(ip, 'user_id', None)
                 uhash = getattr(ip, 'access_hash', None)
                 if uid is not None and uhash is not None:
@@ -639,6 +653,19 @@ async def _invite_one(client, target_entity, user_rec, verify=True, verbose=Fals
                     resolution_steps.append('get_input_entity')
             except Exception:
                 pass
+        if input_user is None and user_rec.get('username'):
+            try:
+                usr_ent = await client.get_entity(user_rec['username'])
+                input_user = InputPeerUser(usr_ent.id, usr_ent.access_hash)
+                resolution_steps.append('resolved_username')
+            except Exception:
+                input_user = None
+        if input_user is None and user_rec.get('access_hash'):
+            try:
+                input_user = InputPeerUser(int(user_rec['user_id']), int(user_rec['access_hash']))
+                resolution_steps.append('from_record')
+            except Exception:
+                input_user = None
         if input_user is None:
             return ('error', 'Could not resolve input user for invitation')
 
@@ -655,8 +682,9 @@ async def _invite_one(client, target_entity, user_rec, verify=True, verbose=Fals
                     if uid2 is not None and uhash2 is not None:
                         iu = InputPeerUser(int(uid2), int(uhash2))
                         resolution_steps.append('refreshed_access_hash')
-            except Exception:
+            except Exception as e:
                 pass
+
             if isinstance(target_entity, TLChannel):
                 channel = InputPeerChannel(target_entity.id, target_entity.access_hash)
                 await client(InviteToChannelRequest(channel, [iu]))
@@ -665,6 +693,7 @@ async def _invite_one(client, target_entity, user_rec, verify=True, verbose=Fals
             else:
                 channel = InputPeerChannel(target_entity.id, getattr(target_entity, 'access_hash', None))
                 await client(InviteToChannelRequest(channel, [iu]))
+
             await asyncio.sleep(2)
         try:
             await do_invite(input_user)
@@ -690,22 +719,46 @@ async def _invite_one(client, target_entity, user_rec, verify=True, verbose=Fals
                     details = f'verified=unknown path={path_info}'
             return ('added', details)
         except errors.UserIdInvalidError as e:
-            # Retry path for invalid user id: try username resolution, then contacts import by phone
+            # Handle invalid object id as a resolvable case (not 'not mutual'): retry via source-prefetch, username, then add-contact
             msg = str(e) or ''
             if 'Invalid object ID for a user' in msg or isinstance(e, errors.UserIdInvalidError):
-                # Attempt username re-resolve if we didn't already
+                # 1) Try prefetching participant from source to warm cache and obtain correct access_hash
                 try:
-                    if user_rec.get('username'):
-                        usr_ent = await client.get_entity(user_rec['username'])
-                        retry_iu = InputPeerUser(usr_ent.id, usr_ent.access_hash)
-                        await do_invite(retry_iu)
-                        # On success, verify (optional)
+                    pref_iu = await _prefetch_user_from_source(client, source_group_id, int(user_rec['user_id']))
+                except Exception:
+                    pref_iu = None
+                if pref_iu:
+                    try:
+                        await do_invite(pref_iu)
                         details = ''
                         if verify:
                             try:
                                 checked = await _is_member(client, target_entity, int(user_rec.get('user_id') or 0))
                                 v = bool(checked) if checked is not None else None
-                                path_info = ','.join(resolution_steps  ['resolved_username_retry'])
+                                path_info = ','.join([*resolution_steps, 'prefetched_from_source_retry'])
+                                if v is True:
+                                    details = f'verified=True path={path_info}'
+                                elif v is False:
+                                    details = f'verified=False path={path_info}'
+                                else:
+                                    details = f'verified=unknown path={path_info}'
+                            except Exception:
+                                details = f"verified=unknown path={'prefetched_from_source_retry'}"
+                        return ('added', details)
+                    except Exception:
+                        pass
+                # 2) Attempt username re-resolve if available
+                try:
+                    if user_rec.get('username'):
+                        usr_ent = await client.get_entity(user_rec['username'])
+                        retry_iu = InputPeerUser(usr_ent.id, usr_ent.access_hash)
+                        await do_invite(retry_iu)
+                        details = ''
+                        if verify:
+                            try:
+                                checked = await _is_member(client, target_entity, int(user_rec.get('user_id') or 0))
+                                v = bool(checked) if checked is not None else None
+                                path_info = ','.join([*resolution_steps, 'resolved_username_retry'])
                                 if v is True:
                                     details = f'verified=True path={path_info}'
                                 elif v is False:
@@ -717,7 +770,7 @@ async def _invite_one(client, target_entity, user_rec, verify=True, verbose=Fals
                         return ('added', details)
                 except Exception:
                     pass
-                # Attempt to add contact by id/hash to obtain access and retry
+                # 3) Attempt to add contact by id/hash to obtain access and retry
                 if allow_contact_fallback:
                     try:
                         ip = await client.get_input_entity(int(user_rec['user_id']))
@@ -739,7 +792,7 @@ async def _invite_one(client, target_entity, user_rec, verify=True, verbose=Fals
                                 try:
                                     checked = await _is_member(client, target_entity, int(user_rec['user_id']))
                                     v = bool(checked) if checked is not None else None
-                                    path_info = ','.join(resolution_steps  ['add_contact_by_id'])
+                                    path_info = ','.join([*resolution_steps, 'add_contact_by_id'])
                                     if v is True:
                                         details = f'verified=True path={path_info}'
                                     elif v is False:
@@ -751,8 +804,8 @@ async def _invite_one(client, target_entity, user_rec, verify=True, verbose=Fals
                             return ('added', details)
                     except Exception:
                         pass
-                # If still failing with invalid id after retries, treat as not-mutual/unknown resolution and SKIP rather than hard error
-                return ('skipped_not_mutual', msg or 'Invalid object ID for a user')
+                # If still failing after retries, classify distinctly (not as 'not mutual')
+                return ('skipped_invalid_id', msg or 'Invalid object ID for a user')
             # If not recoverable, bubble as error result for logging
             return ('error', f"Invite failed: {msg or e.__class__.__name__}")
         except errors.UserPrivacyRestrictedError as e:
@@ -775,15 +828,16 @@ async def _invite_one(client, target_entity, user_rec, verify=True, verbose=Fals
                         except Exception:
                             pass
                         await do_invite(retry_iu)
-                        details = 'verified=unknown path=add_contact_by_id_on_not_mutual'
+                        path_info = ','.join([*resolution_steps, 'add_contact_by_id_on_not_mutual']) if resolution_steps else 'add_contact_by_id_on_not_mutual'
+                        details = f'verified=unknown path={path_info}'
                         if verify:
                             try:
                                 checked = await _is_member(client, target_entity, int(user_rec['user_id']))
                                 v = bool(checked) if checked is not None else None
                                 if v is True:
-                                    details = 'verified=True path=add_contact_by_id_on_not_mutual'
+                                    details = f'verified=True path={path_info}'
                                 elif v is False:
-                                    details = 'verified=False path=add_contact_by_id_on_not_mutual'
+                                    details = f'verified=False path={path_info}'
                             except Exception:
                                 pass
                         return ('added', details)
@@ -844,9 +898,12 @@ async def enhanced_add_workflow():
         return
     src_group_id = src[0]
     src_group_name = src[2]
+    src_username = src[3]
+    src_link_hint = f"https://t.me/{src_username}" if src_username else str(src_group_id)
 
     # Do not fetch members here; each account will fetch its own source members independently
     print(f"Selected source group: {src_group_name} (ID: {src_group_id}). Each account will fetch members independently.")
+    print(f"Source link hint: {src_link_hint}")
 
     # 2) Target group selection
     print("Select target group from your dialogs below or paste link/@username.")
@@ -1100,7 +1157,7 @@ async def enhanced_add_workflow():
     account_states = []
     total_accounts = len(clients)
     for idx, client in enumerate(clients):
-        state = {'name': 'unknown', 'phone': None, 'user_id': None, 'added': 0, 'remaining': daily_limit, 'restricted': False, 'vf_consec': 0, 'initialized': False, 'is_member': False}
+        state = {'name': 'unknown', 'phone': None, 'user_id': None, 'added': 0, 'remaining': daily_limit, 'restricted': False, 'vf_consec': 0, 'initialized': False, 'is_member': False, 'is_src_member': False}
         account_states.append(state)
 
     # Build global candidate list from first available account
@@ -1116,6 +1173,32 @@ async def enhanced_add_workflow():
             account_states[idx]['user_id'] = getattr(me, 'id', None)
             account_states[idx]['phone'] = getattr(me, 'phone', None)
             account_states[idx]['initialized'] = True
+
+            # Load or initialize daily stats from DB (per target)
+            try:
+                _db = Database()
+                _today = datetime.now().strftime('%Y-%m-%d')
+                _phone = account_states[idx]['phone']
+                if _phone:
+                    _stats = _db.get_target_daily_stats(_phone, target_group_id, _today)
+                    if _stats is None:
+                        # Initialize today's per-target counters with configured daily_limit
+                        _db.increment_target_daily_counters(_phone, target_group_id, _today, added_inc=0, remaining=int(daily_limit))
+                        account_states[idx]['added'] = 0
+                        account_states[idx]['remaining'] = int(daily_limit)
+                    else:
+                        _added, _remaining = _stats
+                        account_states[idx]['added'] = int(_added)
+                        account_states[idx]['remaining'] = int(_remaining)
+                        if account_states[idx]['remaining'] <= 0:
+                            account_states[idx]['restricted'] = True
+                try:
+                    _db.close()
+                except Exception:
+                    pass
+            except Exception:
+                # Fallback silently if DB unavailable
+                pass
 
             # Re-resolve target entity to avoid cross-client entity issues
             target_entity_local = target_entity
@@ -1162,8 +1245,55 @@ async def enhanced_add_workflow():
                     pass
             
             account_states[idx]['is_member'] = is_member
+
+            # Ensure source membership and auto-join if needed for this client
+            is_src_member = False
+            try:
+                source_entity_local = None
+                try:
+                    if 'src_link_hint' in locals() and src_link_hint:
+                        source_entity_local = await client.get_entity(src_link_hint)
+                except Exception:
+                    source_entity_local = None
+                if source_entity_local is None:
+                    try:
+                        source_entity_local = await client.get_entity(int(src_group_id))
+                    except Exception:
+                        source_entity_local = int(src_group_id)
+                try:
+                    checked_src = await _is_member(client, source_entity_local, getattr(me, 'id', None))
+                    is_src_member = bool(checked_src)
+                except Exception:
+                    is_src_member = False
+                if not is_src_member and isinstance(source_entity_local, TLChannel):
+                    joined_src = False
+                    try:
+                        await client(JoinChannelRequest(source_entity_local))
+                        joined_src = True
+                    except errors.UserAlreadyParticipantError:
+                        is_src_member = True
+                    except Exception:
+                        try:
+                            if 'src_link_hint' in locals() and isinstance(src_link_hint, str) and (("t.me/" in src_link_hint) or src_link_hint.startswith('@')):
+                                link_entity = await client.get_entity(src_link_hint)
+                                await client(JoinChannelRequest(link_entity))
+                                joined_src = True
+                        except errors.UserAlreadyParticipantError:
+                            is_src_member = True
+                        except Exception:
+                            pass
+                    if not is_src_member and joined_src:
+                        try:
+                            await asyncio.sleep(1)
+                            checked_src = await _is_member(client, source_entity_local, getattr(me, 'id', None))
+                            is_src_member = bool(checked_src)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            account_states[idx]['is_src_member'] = is_src_member
             
-            if is_member:
+            if is_member and is_src_member:
                 # Fetch source members and existing members
                 try:
                     source_members_local = await _fetch_source_members(client, src_group_id)
@@ -1183,6 +1313,9 @@ async def enhanced_add_workflow():
                     target_count = len(existing_ids)
                     filtered_count = len(global_candidates)
                     print(f"[INFO] Source members: {source_count} | Target members: {target_count} | Candidates after filtering: {filtered_count}\n")
+                    
+                    # Candidates kept in-memory for processing; CSV persistence disabled per requirements
+                    pass
                     break
                 except Exception as e:
                     print(f"[{account_states[idx]['name']}] Failed to fetch source members: {e}")
@@ -1190,6 +1323,37 @@ async def enhanced_add_workflow():
         except Exception as e:
             print(f"Failed to initialize account {idx}: {e}")
             continue
+
+    # Warm up all adder accounts by fetching participants from the source group entity
+    try:
+        for idx, client in enumerate(clients):
+            try:
+                await _ensure_connected(client)
+                # Resolve source entity for this client
+                source_entity_local = None
+                try:
+                    if 'src_link_hint' in locals() and src_link_hint:
+                        source_entity_local = await client.get_entity(src_link_hint)
+                except Exception:
+                    source_entity_local = None
+                if source_entity_local is None:
+                    try:
+                        source_entity_local = await client.get_entity(int(src_group_id))
+                    except Exception:
+                        source_entity_local = int(src_group_id)
+                # Fetch participants to warm cache
+                try:
+                    await client.get_participants(source_entity_local)
+                    acct_name = account_states[idx]['name'] if account_states[idx].get('initialized') else f"account {idx}"
+                    print(f"[Warmup] {acct_name} fetched source participants")
+                except Exception as e:
+                    acct_name = account_states[idx]['name'] if account_states[idx].get('initialized') else f"account {idx}"
+                    print(f"[Warmup] {acct_name} failed to fetch participants: {e}")
+                await asyncio.sleep(random.uniform(0.2, 0.8))
+            except Exception as e:
+                print(f"[Warmup] Failed to warm account {idx}: {e}")
+    except Exception:
+        pass
 
     # Initialize remaining selected accounts (names/ids/phones and membership) for proper rotation and reporting
     for idx, client in enumerate(clients):
@@ -1246,6 +1410,53 @@ async def enhanced_add_workflow():
                         except Exception:
                             pass
             account_states[idx]['is_member'] = is_member
+
+            # Also check membership in source and try auto-join if not a member
+            try:
+                is_src_member = False
+                source_entity_local = None
+                try:
+                    if 'src_link_hint' in locals() and src_link_hint:
+                        source_entity_local = await client.get_entity(src_link_hint)
+                except Exception:
+                    source_entity_local = None
+                if source_entity_local is None:
+                    try:
+                        source_entity_local = await client.get_entity(int(src_group_id))
+                    except Exception:
+                        source_entity_local = int(src_group_id)
+                try:
+                    checked_src = await _is_member(client, source_entity_local, state.get('user_id'))
+                    is_src_member = bool(checked_src)
+                except Exception:
+                    is_src_member = False
+                if not is_src_member and isinstance(source_entity_local, TLChannel):
+                    joined_src = False
+                    try:
+                        await client(JoinChannelRequest(source_entity_local))
+                        joined_src = True
+                    except errors.UserAlreadyParticipantError:
+                        is_src_member = True
+                    except Exception:
+                        try:
+                            if 'src_link_hint' in locals() and isinstance(src_link_hint, str) and (("t.me/" in src_link_hint) or src_link_hint.startswith('@')):
+                                link_entity = await client.get_entity(src_link_hint)
+                                await client(JoinChannelRequest(link_entity))
+                                joined_src = True
+                        except errors.UserAlreadyParticipantError:
+                            is_src_member = True
+                        except Exception:
+                            pass
+                    if not is_src_member and joined_src:
+                        try:
+                            await asyncio.sleep(1)
+                            checked_src = await _is_member(client, source_entity_local, state.get('user_id'))
+                            is_src_member = bool(checked_src)
+                        except Exception:
+                            pass
+                account_states[idx]['is_src_member'] = is_src_member
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1267,6 +1478,8 @@ async def enhanced_add_workflow():
             filtered_count = len(filtered)
             print(f"[INFO] Source members: {source_count} | Target members: {target_count} | Candidates after filtering: {filtered_count}\n")
             global_candidates = filtered
+            # Candidates kept in-memory for processing; CSV persistence disabled per requirements
+            pass
         except Exception as e:
             print(f"[WARN] Fallback fetch via browsing account failed: {e}")
 
@@ -1274,14 +1487,18 @@ async def enhanced_add_workflow():
         print("No candidates found or no working accounts available.")
         return
 
-    # Helper function to find next available account (excluding current)
+    # Helper function to find next available account (prefer others; fallback to current if it's the only one)
     def _find_next_account(start_idx):
-        # Iterate over other accounts only (exclude current start_idx entirely)
+        # Prefer other accounts first to keep round-robin behavior
         for i in range(1, total_accounts):  # 1..total_accounts-1
             idx = (start_idx + i) % total_accounts
             state = account_states[idx]
-            if state['remaining'] > 0 and not state['restricted'] and state['is_member']:
+            if state['remaining'] > 0 and not state['restricted'] and state['is_member'] and state.get('is_src_member'):
                 return idx
+        # If none of the other accounts qualify, allow current account if it still qualifies
+        cur = account_states[start_idx]
+        if cur['remaining'] > 0 and not cur['restricted'] and cur['is_member'] and cur.get('is_src_member'):
+            return start_idx
         return None
 
     # Round-robin processing: one member per account rotation
@@ -1318,9 +1535,15 @@ async def enhanced_add_workflow():
                 continue
 
         # Visual header showing current and next account
-        # Compute the next account relative to the current_account_idx
-        next_account_idx = _find_next_account(current_account_idx)
-        next_name = '-' if next_account_idx is None else account_states[next_account_idx]['name']
+        # Compute the next account relative to the current_account_idx (excluding current for display)
+        nxt_idx_display = None
+        for i in range(1, total_accounts):
+            idx2 = (current_account_idx + i) % total_accounts
+            st2 = account_states[idx2]
+            if st2['remaining'] > 0 and not st2['restricted'] and st2['is_member'] and st2.get('is_src_member'):
+                nxt_idx_display = idx2
+                break
+        next_name = '-' if nxt_idx_display is None else account_states[nxt_idx_display]['name']
         print(f"\n=== Account [{account_idx + 1}/{total_accounts}] current: {state['name']} | next: {next_name} | remaining accounts: {total_accounts - account_idx - 1} | per-account remaining: {state['remaining']} ===")
 
         # Get current candidate
@@ -1336,7 +1559,7 @@ async def enhanced_add_workflow():
         except Exception:
             target_entity_local = target_entity
         try:
-            status, msg = await _invite_one(client, target_entity_local, user_rec, verify=POST_INVITE_VERIFY_ENABLED, allow_contact_fallback=ADD_CONTACT_FALLBACK_ENABLED)
+            status, msg = await _invite_one(client, target_entity_local, user_rec, source_group_id=src_group_id, verify=POST_INVITE_VERIFY_ENABLED, allow_contact_fallback=ADD_CONTACT_FALLBACK_ENABLED)
             
             if status == 'added':
                 fem = str(msg or '')
@@ -1366,6 +1589,46 @@ async def enhanced_add_workflow():
                     last_failure.pop(uid, None)
                     _append_added_csv_row(uid, user_rec.get('username'), target_group_name, target_group_id, label, 'Added to group', msg or '')
                     print(f"[ OK ] Added {label} -> {target_group_name} (remaining {state['remaining']})")
+                    # Persist per-target daily counters to DB and log added member
+                    try:
+                        _db = Database()
+                        _today = datetime.now().strftime('%Y-%m-%d')
+                        if state.get('phone'):
+                            _db.increment_target_daily_counters(state['phone'], int(target_group_id), _today, added_inc=1, remaining=int(state['remaining']))
+                            try:
+                                _uid = int(uid)
+                            except Exception:
+                                _uid = None
+                            try:
+                                _db.log_daily_added_member(state['phone'], int(target_group_id), _uid, user_rec.get('username'))
+                            except Exception:
+                                pass
+                        try:
+                            _db.close()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    # If daily limit exhausted, mark restricted and persist (per target + global DB restriction)
+                    if state['remaining'] <= 0:
+                        print(f"[INFO] Account {state['name']} reached daily limit; marking as RESTRICTED for this run.")
+                        state['restricted'] = True
+                        try:
+                            _db = Database()
+                            _today = datetime.now().strftime('%Y-%m-%d')
+                            if state.get('phone'):
+                                _db.upsert_target_daily_stats(state['phone'], int(target_group_id), _today, added=int(state['added']), remaining=int(state['remaining']))
+                                # Also persist global restriction for ~24h so account is excluded across flows
+                                try:
+                                    _db.update_restriction(f"true:{datetime.now().strftime('%Y:%m:%d:%H')}", phone=state['phone'])
+                                except Exception:
+                                    pass
+                            try:
+                                _db.close()
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
                     # Reset consecutive verification failures on success
                     state['vf_consec'] = 0
                     candidate_idx += 1  # Move to next candidate
@@ -1375,6 +1638,7 @@ async def enhanced_add_workflow():
                 reason_map = {
                     'skipped_privacy': 'Restricted (privacy)',
                     'skipped_not_mutual': 'Skipped (not mutual)',
+                    'skipped_invalid_id': 'Skipped (invalid ID)',
                     'skipped_too_many_channels': 'Skipped (too many channels)',
                     'skipped_kicked': 'Skipped (kicked)',
                     'skipped_blocked': 'Skipped (blocked)',
