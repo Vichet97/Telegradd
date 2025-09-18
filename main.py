@@ -7,6 +7,8 @@ import time
 import json
 from pathlib import Path
 import shutil
+import threading
+import uuid
 
 from telegradd.adder.main_adder import main_adder, join_group, join_groups
 from telegradd.connect.authorisation.main_auth import add_account, check_accounts_via_spambot, view_account, delete_banned, auth_for_test, \
@@ -15,6 +17,7 @@ from telegradd.parser.main_parser import parser_page
 from telegradd.connect.authorisation.client import TELEGRADD_client
 from telegradd.connect.authorisation.databased import Database
 from telethon import errors
+from telethon import events
 from telethon.tl.functions.messages import AddChatUserRequest, GetFullChatRequest
 from telethon.tl.functions.channels import InviteToChannelRequest
 from telethon.tl.functions.contacts import ImportContactsRequest, AddContactRequest
@@ -154,6 +157,251 @@ try:
     _USERS_DIR.mkdir(parents=True, exist_ok=True)
 except Exception:
     pass
+
+# CSV persistence (module-level) so all modes can log consistently
+_CSV_PATH = _USERS_DIR / 'added_results.csv'
+_CSV_HEADER = ['user_id', 'username', 'group_name', 'group_id', 'member_label', 'status', 'full error message']
+_existing_pairs = set()
+
+
+def _ensure_added_csv_header():
+    try:
+        # If file doesn't exist or is empty, create with correct header
+        if not _CSV_PATH.exists() or _CSV_PATH.stat().st_size == 0:
+            with open(_CSV_PATH, 'w', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow(_CSV_HEADER)
+            return
+        # If exists, verify header and upgrade if needed (non-destructive)
+        with open(_CSV_PATH, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            try:
+                current_header = next(reader)
+            except StopIteration:
+                current_header = []
+        if current_header != _CSV_HEADER:
+            # Upgrade: read existing rows with DictReader using current_header, then rewrite with new header
+            tmp_path = _CSV_PATH.with_suffix('.tmp.csv')
+            rows = []
+            try:
+                with open(_CSV_PATH, 'r', newline='', encoding='utf-8') as rf:
+                    if current_header:
+                        dict_reader = csv.DictReader(rf, fieldnames=current_header)
+                        # If first row was header, skip it
+                        first_row = next(dict_reader, None)
+                        # Heuristic: if first_row values equal headers, skip, else include
+                        if first_row and any(first_row.get(h) for h in current_header if h is not None):
+                            # It was data; keep it
+                            rows.append(first_row)
+                        for r in dict_reader:
+                            rows.append(r)
+                    else:
+                        # No header; treat as no data
+                        rows = []
+            except Exception:
+                rows = []
+            # Write new file with proper header
+            with open(tmp_path, 'w', newline='', encoding='utf-8') as wf:
+                writer = csv.writer(wf)
+                writer.writerow(_CSV_HEADER)
+                for r in rows:
+                    # Map existing columns, leave new ones blank if missing
+                    out = [
+                        r.get('user_id', '') if isinstance(r, dict) else '',
+                        r.get('username', '') if isinstance(r, dict) else '',
+                        r.get('group_name', '') if isinstance(r, dict) else '',
+                        r.get('group_id', '') if isinstance(r, dict) else '',
+                        r.get('member_label', '') if isinstance(r, dict) else '',
+                        r.get('status', '') if isinstance(r, dict) else '',
+                        r.get('full error message', '') if isinstance(r, dict) else '',
+                    ]
+                    writer.writerow(out)
+            try:
+                shutil.move(str(tmp_path), str(_CSV_PATH))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _append_added_csv_row(user_id, username, group_name, group_id, member_label, status, full_error_msg=''):
+    _ensure_added_csv_header()
+    try:
+        # Normalize error/status text
+        try:
+            fem = ''
+            if isinstance(full_error_msg, (list, tuple)):
+                fem = ' '.join(str(x) for x in full_error_msg)
+            else:
+                fem = str(full_error_msg or '')
+        except Exception:
+            fem = str(full_error_msg or '')
+        fem_l = fem.lower()
+        status_norm = str(status or '').strip().lower()
+
+        # Blacklist: do not log rate limit noise
+        if 'too many requests' in fem_l:
+            return
+        # Only log when we have known terminal verification or contact status, or explicit skipped reason
+        has_verified_flag = ('verified=true' in fem_l) or ('verified=false' in fem_l) or ('verified=unknown' in fem_l)
+        is_not_mutual = ('not a mutual contact' in fem_l) or ('not mutual contact' in fem_l)
+        is_skipped_status = status_norm.startswith('skipped')
+        if not (has_verified_flag or is_not_mutual or is_skipped_status):
+            return
+        # If explicitly failed verification, status must be 'verification failed'
+        if ('verified=false' in fem_l) and (status_norm != 'verification failed'):
+            return
+
+        uid = str(user_id).strip() if user_id is not None else ''
+        gid = str(group_id).strip() if group_id is not None else ''
+        pair = (uid, gid)
+        if uid and gid:
+            # Load existing pairs once
+            if not _existing_pairs:
+                try:
+                    with open(_CSV_PATH, 'r', newline='', encoding='utf-8') as rf:
+                        reader = csv.DictReader(rf)
+                        for row in reader:
+                            ru = str(row.get('user_id', '')).strip()
+                            rg = str(row.get('group_id', '')).strip()
+                            if ru and rg:
+                                _existing_pairs.add((ru, rg))
+                except Exception:
+                    pass
+            if pair in _existing_pairs:
+                return
+        with open(_CSV_PATH, 'a', newline='', encoding='utf-8') as f:
+            csv.writer(f).writerow([user_id, username or '', group_name, group_id, member_label, status, full_error_msg or ''])
+        if uid and gid:
+            _existing_pairs.add(pair)
+    except Exception:
+        pass
+
+
+# Background task infrastructure
+class BackgroundTask:
+    def __init__(self, name, coro_fn, args=(), kwargs=None):
+        self.id = str(uuid.uuid4())[:8]
+        self.name = name
+        self.coro_fn = coro_fn
+        self.args = args or ()
+        self.kwargs = kwargs.copy() if kwargs else {}
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.status = 'pending'
+        self.error = None
+        self.started_at = datetime.now()
+
+    def _runner(self):
+        try:
+            self.status = 'running'
+            kw = dict(self.kwargs)
+            kw['stop_event'] = self.stop_event
+            asyncio.run(self.coro_fn(*self.args, **kw))
+            if self.status != 'stopped':
+                self.status = 'done'
+        except Exception as e:
+            self.error = str(e)
+            self.status = 'error'
+
+    def start(self):
+        if self.thread and self.thread.is_alive():
+            return
+        self.thread = threading.Thread(target=self._runner, name=f"BG-{self.id}", daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        self.status = 'stopped'
+
+
+class BackgroundTaskManager:
+    def __init__(self):
+        self._tasks = {}
+
+    def start_task(self, name, coro_fn, args=(), kwargs=None):
+        task = BackgroundTask(name, coro_fn, args=args, kwargs=kwargs or {})
+        self._tasks[task.id] = task
+        task.start()
+        return task.id
+
+    def list_tasks(self):
+        out = []
+        for tid, t in list(self._tasks.items()):
+            out.append({
+                'id': tid,
+                'name': t.name,
+                'status': t.status,
+                'started_at': t.started_at.strftime('%Y-%m-%d %H:%M:%S'),
+                'error': t.error,
+            })
+        return out
+
+    def stop_task(self, task_id):
+        t = self._tasks.get(task_id)
+        if not t:
+            return False
+        t.stop()
+        return True
+
+    def get_task(self, task_id):
+        return self._tasks.get(task_id)
+
+
+BG_MANAGER = BackgroundTaskManager()
+
+
+def manage_background_tasks():
+    while True:
+        print("\n=== Background Tasks ===")
+        tasks = BG_MANAGER.list_tasks()
+        if not tasks:
+            print("No background tasks running.")
+        else:
+            for t in tasks:
+                print(f"- {t['id']} | {t['status']:>8} | {t['name']} | started {t['started_at']}" + (f" | error: {t['error']}" if t['error'] else ''))
+        print("\nCommands: [r]efresh | s <id> (stop) | v <group_id> [n] (view last n rows from added_results.csv) | q (back)")
+        cmd = input("bg> ").strip()
+        if not cmd:
+            continue
+        if cmd.lower() == 'q':
+            return
+        if cmd.lower() == 'r':
+            continue
+        if cmd.startswith('s '):
+            _, tid = (cmd + ' ').split(' ', 1)
+            tid = tid.strip()
+            if not tid:
+                print('Provide a task id to stop.')
+                continue
+            ok = BG_MANAGER.stop_task(tid)
+            print('Stopped.' if ok else 'Task not found.')
+            continue
+        if cmd.startswith('v '):
+            parts = cmd.split()
+            if len(parts) >= 2:
+                group_id = parts[1]
+                try:
+                    last_n = int(parts[2]) if len(parts) >= 3 else 20
+                except Exception:
+                    last_n = 20
+                try:
+                    _ensure_added_csv_header()
+                    if not _CSV_PATH.exists():
+                        print('CSV not found.')
+                        continue
+                    # Read and filter by group_id, show last_n
+                    rows = []
+                    with open(_CSV_PATH, 'r', newline='', encoding='utf-8') as f:
+                        for row in csv.DictReader(f):
+                            if str(row.get('group_id', '')).strip() == str(group_id):
+                                rows.append(row)
+                    print(f"-- Last {min(last_n, len(rows))} rows for group {group_id} --")
+                    for r in rows[-last_n:]:
+                        print(f"{r.get('user_id','')}, @{r.get('username','')}, {r.get('member_label','')}, {r.get('status','')}, {r.get('full error message','')}")
+                except Exception as e:
+                    print(f"Error reading CSV: {e}")
+            continue
+        print('Unknown command.')
 
 def _find_case_insensitive_file(dir_path: Path, target_name: str) -> Path | None:
     tn = target_name.casefold()
@@ -396,14 +644,15 @@ def home_page():
                 " (21) Add to Restriction\n" \
                 " (22) Convert TData -> telethon_sessions  sessions_json\n" \
                 " (23) Promote members to Admin (with Invite rights)\n" \
+                " (24) Manage Background Tasks\n" \
                  " (0)  Exit\n\n"
     print (page_text)
-    usr_raw_input = input ("Choose an option (0-23) ~# ")
+    usr_raw_input = input ("Choose an option (0-24) ~# ")
     try:
         option = int (usr_raw_input)
     except:
         option = 0
-    if not (0 <= option <= 23):
+    if not (0 <= option <= 24):
         print ("You choose wrong option! try again ...")
         home_page()
     if 1 <= option <= 5:
@@ -459,6 +708,8 @@ def home_page():
         except KeyboardInterrupt:
             print('\nCancelled by user. Returning to menu...')
             return
+    elif option == 24:
+        manage_background_tasks()
     elif option == 0:
         exit(0)
 
@@ -1004,6 +1255,77 @@ async def enhanced_add_workflow():
             elif daily_raw.isdigit():
                 daily_limit = int(daily_raw)
                 limit_set = True
+
+    # Operational Mode Selection
+    print("\nSelect operational mode:")
+    print("1. Scrape existing members: Process all current group/channel participants")
+    print("2. Listen for new member joins: Monitor source for new joins and add them to target")
+    print("3. Run as background task: Execute selected mode in background with task management")
+    
+    try:
+        mode_raw = input("Choose mode (1-3, 0 to go back): ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print('\nCancelled by user. Returning to menu...')
+        return
+    
+    if mode_raw == '0':
+        print('Returning to previous menu...')
+        return
+    
+    if mode_raw == '2':
+        # Listen for new member joins mode
+        await _listen_for_new_members_mode(clients, src_group_id, target_group_id, target_entity, target_group_name, daily_limit, account_states if 'account_states' in locals() else None)
+        return
+    elif mode_raw == '3':
+        # Background task mode - ask which mode to run in background
+        print("\nSelect which mode to run in background:")
+        print("1. Background scrape existing members")
+        print("2. Background listen for new joins")
+        
+        try:
+            bg_mode_raw = input("Choose background mode (1-2, 0 to go back): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print('\nCancelled by user. Returning to menu...')
+            return
+        
+        if bg_mode_raw == '0':
+            print('Returning to previous menu...')
+            return
+        
+        if bg_mode_raw == '1':
+            # Start Mode 1 as background task
+            task_name = f"scrape_members_{src_group_id}_to_{target_group_id}"
+            task_id = BG_MANAGER.start_task(
+                task_name,
+                _scrape_existing_members_mode,
+                args=(clients, browse_client, src_group_id, target_group_id, target_entity, daily_limit),
+                kwargs={'src_link_hint': src_link_hint if 'src_link_hint' in locals() else None, 
+                       'target_link_hint': target_link_hint if 'target_link_hint' in locals() else None}
+            )
+            print(f"[INFO] Started background scrape task with ID: {task_id}")
+            print("Use menu option 24 'Manage Background Tasks' to monitor progress.")
+            return
+        elif bg_mode_raw == '2':
+            # Start Mode 2 as background task
+            task_name = f"listen_joins_{src_group_id}_to_{target_group_id}"
+            task_id = BG_MANAGER.start_task(
+                task_name,
+                _listen_for_new_members_mode,
+                args=(clients, src_group_id, target_group_id, target_entity, target_group_name, daily_limit),
+                kwargs={'account_states': account_states if 'account_states' in locals() else None}
+            )
+            print(f"[INFO] Started background listen task with ID: {task_id}")
+            print("Use menu option 24 'Manage Background Tasks' to monitor progress.")
+            return
+        else:
+            print("Invalid selection. Returning to menu...")
+            return
+    elif mode_raw != '1':
+        print("Invalid selection. Defaulting to scrape existing members.")
+        # Fall through to mode 1
+    
+    # Mode 1: Scrape existing members (continue with current workflow)
+    print(f"[INFO] Starting scrape existing members mode with daily limit {daily_limit} per account.")
 
     # Prepare CSV persistence and pre-load processed ids for this target group
     _CSV_PATH = _USERS_DIR / 'added_results.csv'
@@ -1953,6 +2275,787 @@ async def promote_admin_workflow():
 
     print(f"Done. Success={success}, AlreadyAdmin={already_admin}, NotMember={not_member}, Errors={errors_cnt}, FailedAccountsAuth={len(failed_accounts)}")
 
+
+async def _scrape_existing_members_mode(stop_event, clients, browse_client, src_group_id, target_group_id, target_entity, daily_limit, src_link_hint=None, target_link_hint=None):
+    """
+    Background coroutine for Mode 1: Scrape existing members from source and invite to target.
+    Polls stop_event regularly to allow graceful termination.
+    """
+    try:
+        print(f"[Background Mode 1] Starting scrape existing members task...")
+        print(f"[Background Mode 1] Source: {src_group_id} -> Target: {target_group_id}")
+        print(f"[Background Mode 1] Daily limit per account: {daily_limit}")
+        print(f"[Background Mode 1] Using {len(clients)} accounts")
+        
+        # Check stop_event before starting
+        if stop_event.is_set():
+            print("[Background Mode 1] Stop requested before initialization")
+            return
+        
+        # Build processed user ids for this target group from CSV (only for this target group)
+        _ensure_added_csv_header()
+        processed_ids = set()
+        try:
+            with open(_CSV_PATH, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if str(row.get('group_id', '')).strip() == str(target_group_id):
+                        uid = row.get('user_id')
+                        if uid is None or uid == '':
+                            continue
+                        try:
+                            processed_ids.add(int(str(uid).strip()))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # Track cross-account attempts per user_id
+        attempt_counts = {}
+        last_failure = {}
+
+        # Initialize account states for all clients
+        account_states = []
+        total_accounts = len(clients)
+        for idx, client in enumerate(clients):
+            state = {'name': 'unknown', 'phone': None, 'user_id': None, 'added': 0, 'remaining': daily_limit, 'restricted': False, 'vf_consec': 0, 'initialized': False, 'is_member': False, 'is_src_member': False}
+            account_states.append(state)
+
+        # Check stop_event during initialization
+        if stop_event.is_set():
+            print("[Background Mode 1] Stop requested during account initialization")
+            return
+
+        # Build global candidate list from first available account
+        global_candidates = []
+        existing_ids = set()
+        
+        # Find first working account to build candidate list
+        for idx, client in enumerate(clients):
+            if stop_event.is_set():
+                print("[Background Mode 1] Stop requested during candidate building")
+                return
+                
+            try:
+                await _ensure_connected(client)
+                me = await client.get_me()
+                account_states[idx]['name'] = getattr(me, 'username', None) or getattr(me, 'first_name', None) or str(getattr(me, 'id', 'me'))
+                account_states[idx]['user_id'] = getattr(me, 'id', None)
+                account_states[idx]['phone'] = getattr(me, 'phone', None)
+                account_states[idx]['initialized'] = True
+
+                # Load or initialize daily stats from DB (per target)
+                try:
+                    _db = Database()
+                    _today = datetime.now().strftime('%Y-%m-%d')
+                    _phone = account_states[idx]['phone']
+                    if _phone:
+                        _stats = _db.get_target_daily_stats(_phone, target_group_id, _today)
+                        if _stats is None:
+                            # Initialize today's per-target counters with configured daily_limit
+                            _db.increment_target_daily_counters(_phone, target_group_id, _today, added_inc=0, remaining=int(daily_limit))
+                            account_states[idx]['added'] = 0
+                            account_states[idx]['remaining'] = int(daily_limit)
+                        else:
+                            _added, _remaining = _stats
+                            account_states[idx]['added'] = int(_added)
+                            account_states[idx]['remaining'] = int(_remaining)
+                            if account_states[idx]['remaining'] <= 0:
+                                account_states[idx]['restricted'] = True
+                    try:
+                        _db.close()
+                    except Exception:
+                        pass
+                except Exception:
+                    # Fallback silently if DB unavailable
+                    pass
+
+                # Re-resolve target entity to avoid cross-client entity issues
+                target_entity_local = target_entity
+                try:
+                    if target_link_hint:
+                        target_entity_local = await client.get_entity(target_link_hint)
+                except Exception:
+                    target_entity_local = target_entity
+
+                # Check membership and auto-join if needed
+                try:
+                    checked = await _is_member(client, target_entity_local, getattr(me, 'id', None))
+                    is_member = bool(checked)
+                except Exception:
+                    is_member = False
+                
+                if not is_member:
+                    try:
+                        if isinstance(target_entity_local, TLChannel):
+                            joined = False
+                            try:
+                                await client(JoinChannelRequest(target_entity_local))
+                                joined = True
+                            except errors.UserAlreadyParticipantError:
+                                is_member = True
+                            except Exception:
+                                if target_link_hint and isinstance(target_link_hint, str) and (('t.me/' in target_link_hint) or target_link_hint.startswith('@')):
+                                    try:
+                                        link_entity = await client.get_entity(target_link_hint)
+                                        await client(JoinChannelRequest(link_entity))
+                                        joined = True
+                                    except errors.UserAlreadyParticipantError:
+                                        is_member = True
+                                    except Exception:
+                                        pass
+                            if not is_member and joined:
+                                try:
+                                    await asyncio.sleep(1)
+                                    checked = await _is_member(client, target_entity_local, getattr(me, 'id', None))
+                                    is_member = bool(checked)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                
+                account_states[idx]['is_member'] = is_member
+
+                # Ensure source membership and auto-join if needed for this client
+                is_src_member = False
+                try:
+                    source_entity_local = None
+                    try:
+                        if src_link_hint:
+                            source_entity_local = await client.get_entity(src_link_hint)
+                    except Exception:
+                        source_entity_local = None
+                    if source_entity_local is None:
+                        try:
+                            source_entity_local = await client.get_entity(int(src_group_id))
+                        except Exception:
+                            source_entity_local = int(src_group_id)
+                    try:
+                        checked_src = await _is_member(client, source_entity_local, getattr(me, 'id', None))
+                        is_src_member = bool(checked_src)
+                    except Exception:
+                        is_src_member = False
+                    if not is_src_member and isinstance(source_entity_local, TLChannel):
+                        joined_src = False
+                        try:
+                            await client(JoinChannelRequest(source_entity_local))
+                            joined_src = True
+                        except errors.UserAlreadyParticipantError:
+                            is_src_member = True
+                        except Exception:
+                            try:
+                                if src_link_hint and isinstance(src_link_hint, str) and (("t.me/" in src_link_hint) or src_link_hint.startswith('@')):
+                                    link_entity = await client.get_entity(src_link_hint)
+                                    await client(JoinChannelRequest(link_entity))
+                                    joined_src = True
+                            except errors.UserAlreadyParticipantError:
+                                is_src_member = True
+                            except Exception:
+                                pass
+                        if not is_src_member and joined_src:
+                            try:
+                                await asyncio.sleep(1)
+                                checked_src = await _is_member(client, source_entity_local, getattr(me, 'id', None))
+                                is_src_member = bool(checked_src)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                account_states[idx]['is_src_member'] = is_src_member
+                
+                if is_member and is_src_member:
+                    # Fetch source members and existing members
+                    try:
+                        source_members_local = await _fetch_source_members(client, src_group_id)
+                        uniq_map_local = {}
+                        for m in source_members_local:
+                            uid_key = m.get('user_id')
+                            if uid_key is not None:
+                                uniq_map_local[uid_key] = m
+                        source_members_local = list(uniq_map_local.values())
+                        
+                        existing_ids = await _get_existing_member_ids(client, target_group_id)
+                        
+                        # Build global candidate list
+                        global_candidates = [m for m in source_members_local if (m.get('user_id') not in existing_ids and m.get('user_id') not in processed_ids and attempt_counts.get(m.get('user_id'), 0) < 3)]
+                        
+                        source_count = len(source_members_local)
+                        target_count = len(existing_ids)
+                        filtered_count = len(global_candidates)
+                        print(f"[Background Mode 1] Source members: {source_count} | Target members: {target_count} | Candidates after filtering: {filtered_count}")
+                        
+                        break
+                    except Exception as e:
+                        print(f"[Background Mode 1] [{account_states[idx]['name']}] Failed to fetch source members: {e}")
+                        continue
+            except Exception as e:
+                print(f"[Background Mode 1] Failed to initialize account {idx}: {e}")
+                continue
+
+        # Check stop_event after candidate building
+        if stop_event.is_set():
+            print("[Background Mode 1] Stop requested after candidate building")
+            return
+
+        # Warm up all adder accounts by fetching participants from the source group entity
+        try:
+            for idx, client in enumerate(clients):
+                if stop_event.is_set():
+                    print("[Background Mode 1] Stop requested during warmup")
+                    return
+                    
+                try:
+                    await _ensure_connected(client)
+                    # Resolve source entity for this client
+                    source_entity_local = None
+                    try:
+                        if src_link_hint:
+                            source_entity_local = await client.get_entity(src_link_hint)
+                    except Exception:
+                        source_entity_local = None
+                    if source_entity_local is None:
+                        try:
+                            source_entity_local = await client.get_entity(int(src_group_id))
+                        except Exception:
+                            source_entity_local = int(src_group_id)
+                    # Fetch participants to warm cache
+                    try:
+                        await client.get_participants(source_entity_local)
+                        acct_name = account_states[idx]['name'] if account_states[idx].get('initialized') else f"account {idx}"
+                        print(f"[Background Mode 1] [Warmup] {acct_name} fetched source participants")
+                    except Exception as e:
+                        acct_name = account_states[idx]['name'] if account_states[idx].get('initialized') else f"account {idx}"
+                        print(f"[Background Mode 1] [Warmup] {acct_name} failed to fetch participants: {e}")
+                    await asyncio.sleep(random.uniform(0.2, 0.8))
+                except Exception as e:
+                    print(f"[Background Mode 1] [Warmup] Failed to warm account {idx}: {e}")
+        except Exception:
+            pass
+
+        # Initialize remaining selected accounts (names/ids/phones and membership) for proper rotation and reporting
+        for idx, client in enumerate(clients):
+            if stop_event.is_set():
+                print("[Background Mode 1] Stop requested during account initialization")
+                return
+                
+            state = account_states[idx]
+            if not state['initialized']:
+                try:
+                    await _ensure_connected(client)
+                    me = await client.get_me()
+                    state['name'] = getattr(me, 'username', None) or getattr(me, 'first_name', None) or str(getattr(me, 'id', 'me'))
+                    state['user_id'] = getattr(me, 'id', None)
+                    state['phone'] = getattr(me, 'phone', None)
+                    state['initialized'] = True
+                except Exception:
+                    state['restricted'] = True
+                    continue
+            # Check membership in target and attempt to join if not a member
+            try:
+                target_entity_local = target_entity
+                try:
+                    if target_link_hint:
+                        target_entity_local = await client.get_entity(target_link_hint)
+                except Exception:
+                    target_entity_local = target_entity
+
+                try:
+                    checked = await _is_member(client, target_entity_local, state.get('user_id'))
+                    is_member = bool(checked)
+                except Exception:
+                    is_member = False
+
+                if not is_member:
+                    if isinstance(target_entity_local, TLChannel):
+                        joined = False
+                        try:
+                            await client(JoinChannelRequest(target_entity_local))
+                            joined = True
+                        except errors.UserAlreadyParticipantError:
+                            is_member = True
+                        except Exception:
+                            if target_link_hint and isinstance(target_link_hint, str) and (("t.me/" in target_link_hint) or target_link_hint.startswith('@')):
+                                try:
+                                    link_entity = await client.get_entity(target_link_hint)
+                                    await client(JoinChannelRequest(link_entity))
+                                    joined = True
+                                except errors.UserAlreadyParticipantError:
+                                    is_member = True
+                                except Exception:
+                                    pass
+                        if not is_member and joined:
+                            try:
+                                await asyncio.sleep(1)
+                                checked = await _is_member(client, target_entity_local, state.get('user_id'))
+                                is_member = bool(checked)
+                            except Exception:
+                                pass
+                account_states[idx]['is_member'] = is_member
+
+                # Also check membership in source and try auto-join if not a member
+                try:
+                    is_src_member = False
+                    source_entity_local = None
+                    try:
+                        if src_link_hint:
+                            source_entity_local = await client.get_entity(src_link_hint)
+                    except Exception:
+                        source_entity_local = None
+                    if source_entity_local is None:
+                        try:
+                            source_entity_local = await client.get_entity(int(src_group_id))
+                        except Exception:
+                            source_entity_local = int(src_group_id)
+                    try:
+                        checked_src = await _is_member(client, source_entity_local, state.get('user_id'))
+                        is_src_member = bool(checked_src)
+                    except Exception:
+                        is_src_member = False
+                    if not is_src_member and isinstance(source_entity_local, TLChannel):
+                        joined_src = False
+                        try:
+                            await client(JoinChannelRequest(source_entity_local))
+                            joined_src = True
+                        except errors.UserAlreadyParticipantError:
+                            is_src_member = True
+                        except Exception:
+                            try:
+                                if src_link_hint and isinstance(src_link_hint, str) and (("t.me/" in src_link_hint) or src_link_hint.startswith('@')):
+                                    link_entity = await client.get_entity(src_link_hint)
+                                    await client(JoinChannelRequest(link_entity))
+                                    joined_src = True
+                            except errors.UserAlreadyParticipantError:
+                                is_src_member = True
+                            except Exception:
+                                pass
+                        if not is_src_member and joined_src:
+                            try:
+                                await asyncio.sleep(1)
+                                checked_src = await _is_member(client, source_entity_local, state.get('user_id'))
+                                is_src_member = bool(checked_src)
+                            except Exception:
+                                pass
+                    account_states[idx]['is_src_member'] = is_src_member
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # Fallback: if selected accounts couldn't fetch candidates, use browsing account to fetch
+        if not global_candidates:
+            if stop_event.is_set():
+                print("[Background Mode 1] Stop requested during fallback candidate fetch")
+                return
+                
+            try:
+                print("[Background Mode 1] Selected accounts could not build candidate list. Falling back to browsing account to fetch source members...")
+                source_members_local = await _fetch_source_members(browse_client, src_group_id)
+                uniq_map_local = {}
+                for m in source_members_local:
+                    uid_key = m.get('user_id')
+                    if uid_key is not None:
+                        uniq_map_local[uid_key] = m
+                source_members_local = list(uniq_map_local.values())
+                existing_ids = await _get_existing_member_ids(browse_client, target_group_id)
+                filtered = [m for m in source_members_local if (m.get('user_id') not in existing_ids and m.get('user_id') not in processed_ids and attempt_counts.get(m.get('user_id'), 0) < 3)]
+                source_count = len(source_members_local)
+                target_count = len(existing_ids)
+                filtered_count = len(filtered)
+                print(f"[Background Mode 1] Source members: {source_count} | Target members: {target_count} | Candidates after filtering: {filtered_count}")
+                global_candidates = filtered
+            except Exception as e:
+                print(f"[Background Mode 1] [WARN] Fallback fetch via browsing account failed: {e}")
+
+        if not global_candidates:
+            print("[Background Mode 1] No candidates found or no working accounts available.")
+            return
+
+        # Helper function to find next available account (prefer others; fallback to current if it's the only one)
+        def _find_next_account(start_idx):
+            # Prefer other accounts first to keep round-robin behavior
+            for i in range(1, total_accounts):  # 1..total_accounts-1
+                idx = (start_idx + i) % total_accounts
+                state = account_states[idx]
+                if state['remaining'] > 0 and not state['restricted'] and state['is_member'] and state.get('is_src_member'):
+                    return idx
+            # If none of the other accounts qualify, allow current account if it still qualifies
+            cur = account_states[start_idx]
+            if cur['remaining'] > 0 and not cur['restricted'] and cur['is_member'] and cur.get('is_src_member'):
+                return start_idx
+            return None
+
+        # Round-robin processing: one member per account rotation
+        current_account_idx = 0
+        candidate_idx = 0
+        no_progress_rounds = 0
+        MAX_NO_PROGRESS_ROUNDS = total_accounts * 3
+
+        print(f"[Background Mode 1] Starting invitation process with {len(global_candidates)} candidates...")
+
+        while candidate_idx < len(global_candidates) and no_progress_rounds < MAX_NO_PROGRESS_ROUNDS:
+            # Check stop_event in main processing loop
+            if stop_event.is_set():
+                print("[Background Mode 1] Stop requested during invitation processing")
+                break
+                
+            # Find next available account starting from current_account_idx
+            account_idx = _find_next_account(current_account_idx)
+            
+            if account_idx is None:
+                print("[Background Mode 1] No available accounts for inviting. Stopping.")
+                break
+
+            client = clients[account_idx]
+            state = account_states[account_idx]
+            member = global_candidates[candidate_idx]
+            
+            try:
+                # Attempt invitation
+                result = await _invite_one(
+                    client, member, target_entity, target_group_id,
+                    state['name'], state['phone']
+                )
+                
+                # Process result and update counters
+                if result and result.get('status') == 'added':
+                    state['added'] += 1
+                    state['remaining'] -= 1
+                    
+                    # Update database counters
+                    try:
+                        _db = Database()
+                        _today = datetime.now().strftime('%Y-%m-%d')
+                        if state['phone']:
+                            _db.increment_target_daily_counters(state['phone'], target_group_id, _today, added_inc=1, remaining=-1)
+                        try:
+                            _db.close()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    
+                    print(f"[Background Mode 1] [{state['name']}] Successfully added user {member.get('user_id')} ({state['added']}/{daily_limit})")
+                    no_progress_rounds = 0
+                else:
+                    # Handle failure
+                    user_id = member.get('user_id')
+                    if user_id:
+                        attempt_counts[user_id] = attempt_counts.get(user_id, 0) + 1
+                        last_failure[user_id] = time.time()
+                    
+                    error_msg = result.get('error', 'Unknown error') if result else 'No result'
+                    print(f"[Background Mode 1] [{state['name']}] Failed to add user {member.get('user_id')}: {error_msg}")
+                
+                # Check if account is now restricted
+                if state['remaining'] <= 0:
+                    state['restricted'] = True
+                    print(f"[Background Mode 1] [{state['name']}] Daily limit reached, marking as restricted")
+                
+            except Exception as e:
+                print(f"[Background Mode 1] [{state['name']}] Exception during invitation: {e}")
+                user_id = member.get('user_id')
+                if user_id:
+                    attempt_counts[user_id] = attempt_counts.get(user_id, 0) + 1
+                    last_failure[user_id] = time.time()
+            
+            # Move to next candidate and account
+            candidate_idx += 1
+            current_account_idx = (account_idx + 1) % total_accounts
+            
+            # Add delay between invitations
+            await asyncio.sleep(random.uniform(2, 5))
+            
+            # Check progress
+            if candidate_idx % 10 == 0:
+                active_accounts = sum(1 for s in account_states if not s['restricted'])
+                total_added = sum(s['added'] for s in account_states)
+                print(f"[Background Mode 1] Progress: {candidate_idx}/{len(global_candidates)} processed, {total_added} added, {active_accounts} active accounts")
+        
+        # Final summary
+        total_added = sum(s['added'] for s in account_states)
+        print(f"[Background Mode 1] Task completed. Total added: {total_added}")
+        print(f"[Background Mode 1] Processed {candidate_idx}/{len(global_candidates)} candidates")
+        
+        for idx, state in enumerate(account_states):
+            if state.get('initialized'):
+                print(f"[Background Mode 1] [{state['name']}] Added: {state['added']}, Remaining: {state['remaining']}")
+    
+    except asyncio.CancelledError:
+        print("[Background Mode 1] Task was cancelled")
+        raise
+    except KeyboardInterrupt:
+        print("[Background Mode 1] Task interrupted by user")
+    except Exception as e:
+        print(f"[Background Mode 1] Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+async def _listen_for_new_members_mode(clients, src_group_id, target_group_id, target_entity, target_group_name, daily_limit, account_states=None, stop_event=None):
+    import asyncio, random, csv
+    from datetime import datetime
+    from telethon import events
+    from telethon.tl.functions.channels import JoinChannelRequest
+    from telethon.tl.types import Channel as TLChannel
+    # Guard
+    if not clients:
+        print("No available (unrestricted) accounts found.")
+        return
+    # Load processed ids for this target from CSV once to avoid re-invites
+    processed_ids = set()
+    try:
+        _csv_path = _USERS_DIR / 'added_results.csv'
+        if _csv_path.exists():
+            with open(_csv_path, 'r', newline='', encoding='utf-8') as f:
+                for row in csv.DictReader(f):
+                    if str(row.get('group_id', '')).strip() == str(target_group_id):
+                        try:
+                            uid = int(str(row.get('user_id', '')).strip())
+                            processed_ids.add(uid)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+    # Initialize per-account states
+    n = len(clients)
+    if not isinstance(account_states, list) or len(account_states) != n:
+        account_states = [
+            {'name': 'unknown', 'phone': None, 'user_id': None, 'added': 0, 'remaining': int(daily_limit), 'restricted': False, 'initialized': False, 'is_member': False, 'is_src_member': False}
+            for _ in range(n)
+        ]
+    # Prepare/initialize each client
+    for i, client in enumerate(clients):
+        st = account_states[i]
+        try:
+            await _ensure_connected(client)
+            me = await client.get_me()
+            st['name'] = getattr(me, 'username', None) or getattr(me, 'first_name', None) or str(getattr(me, 'id', 'me'))
+            st['user_id'] = getattr(me, 'id', None)
+            st['phone'] = getattr(me, 'phone', None)
+            st['initialized'] = True
+            # Load per-target daily counters from DB
+            try:
+                _db = Database()
+                _today = datetime.now().strftime('%Y-%m-%d')
+                if st.get('phone'):
+                    stats = _db.get_target_daily_stats(st['phone'], int(target_group_id), _today)
+                    if stats is None:
+                        _db.increment_target_daily_counters(st['phone'], int(target_group_id), _today, added_inc=0, remaining=int(daily_limit))
+                        st['added'] = 0
+                        st['remaining'] = int(daily_limit)
+                    else:
+                        a, r = stats
+                        st['added'] = int(a)
+                        st['remaining'] = int(r)
+                        if st['remaining'] <= 0:
+                            st['restricted'] = True
+            finally:
+                try:
+                    _db.close()
+                except Exception:
+                    pass
+            # Ensure membership in target and source groups
+            try:
+                is_member = bool(await _is_member(client, target_entity, st.get('user_id')))
+            except Exception:
+                is_member = False
+            if not is_member and isinstance(target_entity, TLChannel):
+                try:
+                    await client(JoinChannelRequest(target_entity))
+                    await asyncio.sleep(1)
+                    is_member = bool(await _is_member(client, target_entity, st.get('user_id')))
+                except Exception:
+                    pass
+            st['is_member'] = is_member
+            try:
+                src_ent_local = None
+                try:
+                    src_ent_local = await client.get_entity(int(src_group_id))
+                except Exception:
+                    src_ent_local = int(src_group_id)
+                is_src_member = bool(await _is_member(client, src_ent_local, st.get('user_id')))
+            except Exception:
+                is_src_member = False
+            if not is_src_member and isinstance(src_ent_local, TLChannel):
+                try:
+                    await client(JoinChannelRequest(src_ent_local))
+                    await asyncio.sleep(1)
+                    is_src_member = bool(await _is_member(client, src_ent_local, st.get('user_id')))
+                except Exception:
+                    pass
+            st['is_src_member'] = is_src_member
+        except Exception as e:
+            print(f"[Init] Account {i} failed to init: {e}")
+            st['restricted'] = True
+    # Choose monitor client
+    monitor = None
+    for c in clients:
+        try:
+            await _ensure_connected(c)
+            monitor = c
+            break
+        except Exception:
+            continue
+    if monitor is None:
+        print('No working client to monitor source group.')
+        return
+    # Resolve source entity for event filter
+    try:
+        try:
+            src_entity = await monitor.get_entity(int(src_group_id))
+        except Exception:
+            src_entity = int(src_group_id)
+    except Exception:
+        src_entity = int(src_group_id)
+    # Preload existing members in target
+    try:
+        existing_ids = await _get_existing_member_ids(monitor, target_group_id)
+    except Exception:
+        existing_ids = set()
+    total = len(clients)
+    current_idx = 0
+    attempts = {}
+    seen = set()
+    def _find_next(start):
+        for d in range(total):
+            idx = (start + d) % total
+            st = account_states[idx]
+            if st['remaining'] > 0 and not st['restricted'] and st.get('is_member') and st.get('is_src_member'):
+                return idx
+        return None
+    print("\n[LISTEN] Listening for new member joins. Press Ctrl+C to stop.\n")
+    async def handle_join(event):
+        nonlocal current_idx
+        if stop_event and stop_event.is_set():
+            return
+        # Filter only join/add actions
+        try:
+            if not (getattr(event, 'user_joined', False) or getattr(event, 'user_added', False)):
+                return
+        except Exception:
+            return
+        # Collect user ids from event
+        uids = []
+        try:
+            if getattr(event, 'user_id', None):
+                uids = [event.user_id]
+            elif getattr(event, 'users', None):
+                uids = [getattr(u, 'id', None) for u in event.users if getattr(u, 'id', None) is not None]
+        except Exception:
+            pass
+        for uid in uids:
+            if uid is None:
+                continue
+            if uid in processed_ids or uid in existing_ids or uid in seen:
+                continue
+            seen.add(uid)
+            idx = _find_next(current_idx)
+            if idx is None:
+                print('[LISTEN] No eligible accounts available (limits exhausted or restricted).')
+                continue
+            current_idx = idx
+            client = clients[idx]
+            st = account_states[idx]
+            # Build label
+            username = None
+            try:
+                if getattr(event, 'user', None) is not None:
+                    username = getattr(event.user, 'username', None)
+            except Exception:
+                pass
+            user_rec = {'user_id': int(uid), 'username': username}
+            label = _format_member_label(user_rec)
+            # Attempt invite
+            try:
+                status, msg = await _invite_one(client, target_entity, user_rec, source_group_id=src_group_id, verify=POST_INVITE_VERIFY_ENABLED, allow_contact_fallback=ADD_CONTACT_FALLBACK_ENABLED)
+            except Exception as e:
+                status, msg = ('error', str(e))
+            if status == 'added':
+                st['added'] += 1
+                st['remaining'] -= 1
+                processed_ids.add(uid)
+                existing_ids.add(uid)
+                attempts.pop(uid, None)
+                _append_added_csv_row(uid, username, target_group_name, target_group_id, label, 'Added to group', msg or '')
+                print(f"[LISTEN][ OK ] Added {label} -> {target_group_name} (remaining {st['remaining']})")
+                # Persist DB counters and log added member
+                try:
+                    _db = Database()
+                    _today = datetime.now().strftime('%Y-%m-%d')
+                    if st.get('phone'):
+                        _db.increment_target_daily_counters(st['phone'], int(target_group_id), _today, added_inc=1, remaining=int(st['remaining']))
+                        try:
+                            _db.log_daily_added_member(st['phone'], int(target_group_id), int(uid), username)
+                        except Exception:
+                            pass
+                finally:
+                    try:
+                        _db.close()
+                    except Exception:
+                        pass
+                if st['remaining'] <= 0:
+                    print(f"[LISTEN][INFO] Account {st['name']} reached daily limit; marking RESTRICTED.")
+                    st['restricted'] = True
+                    try:
+                        _db = Database()
+                        _today = datetime.now().strftime('%Y-%m-%d')
+                        if st.get('phone'):
+                            _db.upsert_target_daily_stats(st['phone'], int(target_group_id), _today, added=int(st['added']), remaining=int(st['remaining']))
+                            try:
+                                _db.update_restriction(f"true:{datetime.now().strftime('%Y:%m:%d:%H')}", phone=st['phone'])
+                            except Exception:
+                                pass
+                    finally:
+                        try:
+                            _db.close()
+                        except Exception:
+                            pass
+                await asyncio.sleep(random.randint(10, 15))
+                return
+            elif isinstance(status, str) and status.startswith('skipped'):
+                processed_ids.add(uid)
+                reason_map = {
+                    'skipped_privacy': 'Restricted (privacy)',
+                    'skipped_not_mutual': 'Skipped (not mutual)',
+                    'skipped_invalid_id': 'Skipped (invalid ID)',
+                    'skipped_too_many_channels': 'Skipped (too many channels)',
+                    'skipped_kicked': 'Skipped (kicked)',
+                    'skipped_blocked': 'Skipped (blocked)',
+                }
+                reason = reason_map.get(status, 'Skipped')
+                _append_added_csv_row(uid, username, target_group_name, target_group_id, label, reason, msg or '')
+                print(f"[LISTEN][SKIP] {label} -> {reason}")
+                return
+            else:
+                attempts[uid] = attempts.get(uid, 0) + 1
+                if attempts[uid] >= 3:
+                    processed_ids.add(uid)
+                    _append_added_csv_row(uid, username, target_group_name, target_group_id, label, 'Restricted', msg or '')
+                    print(f"[LISTEN][FAIL] After 3 attempts: {label} -> Restricted")
+                else:
+                    print(f"[LISTEN][RETRY] {label} -> {msg} (attempt {attempts[uid]}/3)")
+                if st.get('phone'):
+                    try:
+                        Database().update_restriction(f"true:{datetime.now().strftime('%Y:%m:%d:%H')}", phone=st['phone'])
+                        st['restricted'] = True
+                    except Exception:
+                        pass
+                return
+    monitor.add_event_handler(handle_join, events.ChatAction(chats=src_entity))
+    try:
+        while not (stop_event and stop_event.is_set()):
+            await asyncio.sleep(2)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print('\n[LISTEN] Stopping listener...\n')
+    finally:
+        try:
+            monitor.remove_event_handler(handle_join, events.ChatAction(chats=src_entity))
+        except Exception:
+            pass
+        print('\nFinal Summary (listen mode):')
+        for st in account_states:
+            status_txt = 'RESTRICTED' if st['restricted'] else 'ACTIVE'
+            print(f" - {st['name']} (phone: {st.get('phone','?')}, id: {st.get('user_id','?')}): added {st['added']}, remaining {st['remaining']} [{status_txt}]")
 
 if __name__ == '__main__':
     home_page()
