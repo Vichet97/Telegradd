@@ -535,3 +535,4 @@ user_id,username,group_name,group_id,member_label,status,full error message
 1047017602,Chhy_Heng,iMobile Phone,3060514178,Dio (@Chhy_Heng),Added to group,"verified=True path=prefetched_from_source,refreshed_access_hash"
 1949277655,racksasasa,iMobile Phone,3060514178,Racksa (@racksasasa),Added to group,"verified=True path=prefetched_from_source,refreshed_access_hash"
 1029902984,,iMobile Phone,3060514178,Ly Dollar (85516589493),Added to group,"verified=True path=prefetched_from_source,refreshed_access_hash"
+1149139264,,iMobile Phone,3060514178,La,Verification failed,"verified=False path=prefetched_from_source,refreshed_access_hash"
