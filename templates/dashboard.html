@@ -1,0 +1,678 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Telegradd Web Interface{% endblock %}
+
+{% block extra_head %}
+<style>
+    .status-indicator {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 8px;
+    }
+    .status-online { background-color: #28a745; }
+    .status-offline { background-color: #dc3545; }
+    .status-unknown { background-color: #ffc107; }
+    
+    .feature-card {
+        transition: transform 0.2s, box-shadow 0.2s;
+        cursor: pointer;
+        height: 100%;
+    }
+    .feature-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+    }
+    
+    .stats-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+    }
+    
+    .account-card {
+        border-left: 4px solid #007bff;
+    }
+    
+    .refresh-btn {
+        animation: spin 2s linear infinite;
+    }
+    
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- Page Header -->
+    <div class="d-sm-flex align-items-center justify-content-between mb-4">
+        <h1 class="h3 mb-0 text-gray-800">
+            <i class="fas fa-tachometer-alt me-2"></i>Dashboard
+        </h1>
+        <button class="btn btn-primary" onclick="refreshData()">
+            <i class="fas fa-sync-alt me-2" id="refreshIcon"></i>Refresh Data
+        </button>
+    </div>
+
+    <!-- Statistics Cards -->
+    <div class="row mb-4">
+        <div class="col-xl-3 col-md-6 mb-4">
+            <div class="card stats-card shadow h-100 py-2">
+                <div class="card-body">
+                    <div class="row no-gutters align-items-center">
+                        <div class="col mr-2">
+                            <div class="text-xs font-weight-bold text-uppercase mb-1">Total Accounts</div>
+                            <div class="h5 mb-0 font-weight-bold" id="totalAccounts">{{ total_accounts }}</div>
+                        </div>
+                        <div class="col-auto">
+                            <i class="fas fa-users fa-2x opacity-75"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-3 col-md-6 mb-4">
+            <div class="card bg-success text-white shadow h-100 py-2">
+                <div class="card-body">
+                    <div class="row no-gutters align-items-center">
+                        <div class="col mr-2">
+                            <div class="text-xs font-weight-bold text-uppercase mb-1">Online Accounts</div>
+                            <div class="h5 mb-0 font-weight-bold" id="onlineAccounts">{{ online_accounts }}</div>
+                        </div>
+                        <div class="col-auto">
+                            <i class="fas fa-check-circle fa-2x opacity-75"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-3 col-md-6 mb-4">
+            <div class="card bg-info text-white shadow h-100 py-2">
+                <div class="card-body">
+                    <div class="row no-gutters align-items-center">
+                        <div class="col mr-2">
+                            <div class="text-xs font-weight-bold text-uppercase mb-1">Background Tasks</div>
+                            <div class="h5 mb-0 font-weight-bold" id="backgroundTasks">{{ bg_tasks|length }}</div>
+                        </div>
+                        <div class="col-auto">
+                            <i class="fas fa-tasks fa-2x opacity-75"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-3 col-md-6 mb-4">
+            <div class="card bg-warning text-white shadow h-100 py-2">
+                <div class="card-body">
+                    <div class="row no-gutters align-items-center">
+                        <div class="col mr-2">
+                            <div class="text-xs font-weight-bold text-uppercase mb-1">Last Updated</div>
+                            <div class="h6 mb-0 font-weight-bold" id="lastUpdated">Just now</div>
+                        </div>
+                        <div class="col-auto">
+                            <i class="fas fa-clock fa-2x opacity-75"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- Account Status Panel -->
+        <div class="col-lg-8 mb-4">
+            <div class="card shadow">
+                <div class="card-header py-3 d-flex flex-row align-items-center justify-content-between">
+                    <h6 class="m-0 font-weight-bold text-primary">
+                        <i class="fas fa-users me-2"></i>Account Status
+                    </h6>
+                    <div class="dropdown no-arrow">
+                        <a class="dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
+                            <i class="fas fa-ellipsis-v fa-sm fa-fw text-gray-400"></i>
+                        </a>
+                        <div class="dropdown-menu dropdown-menu-right shadow">
+                            <a class="dropdown-item" href="{{ url_for('list_accounts') }}">View All Accounts</a>
+                            <a class="dropdown-item" href="{{ url_for('test_auth') }}">Test Authorization</a>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover" id="accountsTable">
+                            <thead>
+                                <tr>
+                                    <th>Phone Number</th>
+                                    <th>Status</th>
+                                    <th>Type</th>
+                                    <th>Added Today</th>
+                                    <th>Remaining Limit</th>
+                                    <th>Last Active</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for account in accounts %}
+                                <tr>
+                                    <td>
+                                        <strong>{{ account.phone }}</strong>
+                                    </td>
+                                    <td>
+                                        <span class="status-indicator status-{{ account.status }}"></span>
+                                        <span class="badge bg-{{ 'success' if account.status == 'online' else 'danger' if account.status == 'offline' else 'warning' }}">
+                                            {{ account.status.title() }}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <span class="badge bg-secondary">{{ account.type.upper() }}</span>
+                                    </td>
+                                    <td>{{ account.added_today }}</td>
+                                    <td>{{ account.remaining_limit }}</td>
+                                    <td>
+                                        <small class="text-muted">{{ account.last_active }}</small>
+                                    </td>
+                                </tr>
+                                {% else %}
+                                <tr>
+                                    <td colspan="6" class="text-center text-muted">
+                                        <i class="fas fa-inbox fa-2x mb-2"></i>
+                                        <br>No accounts found. Please add some accounts first.
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quick Actions Panel -->
+        <div class="col-lg-4 mb-4">
+            <div class="card shadow">
+                <div class="card-header py-3">
+                    <h6 class="m-0 font-weight-bold text-primary">
+                        <i class="fas fa-bolt me-2"></i>Quick Actions
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <div class="d-grid gap-2">
+                        <a href="{{ url_for('login_phone') }}" class="btn btn-outline-primary">
+                            <i class="fas fa-phone me-2"></i>Add New Account
+                        </a>
+                        <a href="{{ url_for('scraper_participants') }}" class="btn btn-outline-success">
+                            <i class="fas fa-search me-2"></i>Start Scraping
+                        </a>
+                        <a href="{{ url_for('add_by_username') }}" class="btn btn-outline-info">
+                            <i class="fas fa-user-plus me-2"></i>Add Members
+                        </a>
+                        <a href="{{ url_for('background_tasks') }}" class="btn btn-outline-warning">
+                            <i class="fas fa-tasks me-2"></i>Manage Tasks
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Background Tasks Status -->
+            <div class="card shadow mt-4">
+                <div class="card-header py-3">
+                    <h6 class="m-0 font-weight-bold text-primary">
+                        <i class="fas fa-tasks me-2"></i>Active Tasks
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <div id="backgroundTasksList">
+                        {% if bg_tasks %}
+                            {% for task in bg_tasks %}
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <div>
+                                    <small class="fw-bold">{{ task.name }}</small>
+                                    <br>
+                                    <small class="text-muted">{{ task.status }}</small>
+                                </div>
+                                <span class="badge bg-{{ 'success' if task.status == 'running' else 'secondary' }}">
+                                    {{ task.status }}
+                                </span>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                        <div class="text-center text-muted">
+                            <i class="fas fa-sleep fa-2x mb-2"></i>
+                            <br>No active tasks
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Features Grid -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card shadow">
+                <div class="card-header py-3">
+                    <h6 class="m-0 font-weight-bold text-primary">
+                        <i class="fas fa-th-large me-2"></i>All Features (24)
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <!-- Login & Sessions Features (1-5) -->
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('login_phone') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-primary">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-phone fa-2x text-primary mb-2"></i>
+                                        <h6 class="card-title">Login Phone</h6>
+                                        <small class="text-muted">Feature 1</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('load_sessions') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-success">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-file-code fa-2x text-success mb-2"></i>
+                                        <h6 class="card-title">Load Sessions</h6>
+                                        <small class="text-muted">Feature 2</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('load_tdata') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-info">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-database fa-2x text-info mb-2"></i>
+                                        <h6 class="card-title">Load Tdata</h6>
+                                        <small class="text-muted">Feature 3</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('load_pyrogram') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-warning">
+                                    <div class="card-body text-center">
+                                        <i class="fab fa-python fa-2x text-warning mb-2"></i>
+                                        <h6 class="card-title">Load Pyrogram</h6>
+                                        <small class="text-muted">Feature 4</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('load_telethon') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-danger">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-cog fa-2x text-danger mb-2"></i>
+                                        <h6 class="card-title">Load Telethon</h6>
+                                        <small class="text-muted">Feature 5</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <!-- Scraper Features (6-8) -->
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('scraper_participants') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-primary">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-search fa-2x text-primary mb-2"></i>
+                                        <h6 class="card-title">Scrape Participants</h6>
+                                        <small class="text-muted">Feature 6</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('scraper_hidden') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-secondary">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-user-secret fa-2x text-secondary mb-2"></i>
+                                        <h6 class="card-title">Hidden Scraper</h6>
+                                        <small class="text-muted">Feature 7</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('scraper_comments') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-success">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-comments fa-2x text-success mb-2"></i>
+                                        <h6 class="card-title">Comments Scraper</h6>
+                                        <small class="text-muted">Feature 8</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <!-- Add Members Features (9-11) -->
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('add_by_id') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-info">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-hashtag fa-2x text-info mb-2"></i>
+                                        <h6 class="card-title">Add by ID</h6>
+                                        <small class="text-muted">Feature 9</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('add_by_username') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-warning">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-at fa-2x text-warning mb-2"></i>
+                                        <h6 class="card-title">Add by Username</h6>
+                                        <small class="text-muted">Feature 10</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('warm_up') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-danger">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-fire fa-2x text-danger mb-2"></i>
+                                        <h6 class="card-title">Warm Up</h6>
+                                        <small class="text-muted">Feature 11</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <!-- Management Features (12-24) -->
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('delete_banned') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-dark">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-ban fa-2x text-dark mb-2"></i>
+                                        <h6 class="card-title">Delete Banned</h6>
+                                        <small class="text-muted">Feature 12</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <!-- Additional Features (13-24) -->
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('background_tasks') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-primary">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-tasks fa-2x text-primary mb-2"></i>
+                                        <h6 class="card-title">Background Tasks</h6>
+                                        <small class="text-muted">Feature 13</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-success">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-chart-line fa-2x text-success mb-2"></i>
+                                        <h6 class="card-title">Analytics</h6>
+                                        <small class="text-muted">Feature 14</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-info">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-cogs fa-2x text-info mb-2"></i>
+                                        <h6 class="card-title">Settings</h6>
+                                        <small class="text-muted">Feature 15</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-warning">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-download fa-2x text-warning mb-2"></i>
+                                        <h6 class="card-title">Export Data</h6>
+                                        <small class="text-muted">Feature 16</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-danger">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-upload fa-2x text-danger mb-2"></i>
+                                        <h6 class="card-title">Import Data</h6>
+                                        <small class="text-muted">Feature 17</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-dark">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-shield-alt fa-2x text-dark mb-2"></i>
+                                        <h6 class="card-title">Security</h6>
+                                        <small class="text-muted">Feature 18</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-secondary">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-history fa-2x text-secondary mb-2"></i>
+                                        <h6 class="card-title">History</h6>
+                                        <small class="text-muted">Feature 19</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-primary">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-bell fa-2x text-primary mb-2"></i>
+                                        <h6 class="card-title">Notifications</h6>
+                                        <small class="text-muted">Feature 20</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-success">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-users fa-2x text-success mb-2"></i>
+                                        <h6 class="card-title">User Management</h6>
+                                        <small class="text-muted">Feature 21</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-info">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-file-alt fa-2x text-info mb-2"></i>
+                                        <h6 class="card-title">Reports</h6>
+                                        <small class="text-muted">Feature 22</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-warning">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-question-circle fa-2x text-warning mb-2"></i>
+                                        <h6 class="card-title">Help & Support</h6>
+                                        <small class="text-muted">Feature 23</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+                        
+                        <div class="col-lg-2 col-md-4 col-sm-6 mb-3">
+                            <a href="{{ url_for('logout') }}" class="text-decoration-none">
+                                <div class="card feature-card border-left-danger">
+                                    <div class="card-body text-center">
+                                        <i class="fas fa-sign-out-alt fa-2x text-danger mb-2"></i>
+                                        <h6 class="card-title">Logout</h6>
+                                        <small class="text-muted">Feature 24</small>
+                                    </div>
+                                </div>
+                            </a>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let dashboardRefreshInterval;
+
+function refreshData() {
+    const refreshIcon = document.getElementById('refreshIcon');
+    refreshIcon.classList.add('refresh-btn');
+    
+    // Refresh account status
+    fetch('/api/accounts/status')
+        .then(response => response.json())
+        .then(data => {
+            updateAccountsTable(data.accounts);
+            document.getElementById('totalAccounts').textContent = data.total;
+            document.getElementById('onlineAccounts').textContent = data.online;
+            document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
+        })
+        .catch(error => console.error('Error refreshing account data:', error));
+    
+    // Refresh background tasks
+    fetch('/api/background-tasks')
+        .then(response => response.json())
+        .then(data => {
+            updateBackgroundTasks(data.tasks);
+            document.getElementById('backgroundTasks').textContent = data.tasks.length;
+        })
+        .catch(error => console.error('Error refreshing task data:', error));
+    
+    setTimeout(() => {
+        refreshIcon.classList.remove('refresh-btn');
+    }, 2000);
+}
+
+function updateAccountsTable(accounts) {
+    const tbody = document.querySelector('#accountsTable tbody');
+    tbody.innerHTML = '';
+    
+    if (accounts.length === 0) {
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="6" class="text-center text-muted">
+                    <i class="fas fa-inbox fa-2x mb-2"></i>
+                    <br>No accounts found. Please add some accounts first.
+                </td>
+            </tr>
+        `;
+        return;
+    }
+    
+    accounts.forEach(account => {
+        const statusClass = account.status === 'online' ? 'success' : 
+                           account.status === 'offline' ? 'danger' : 'warning';
+        
+        const row = `
+            <tr>
+                <td><strong>${account.phone}</strong></td>
+                <td>
+                    <span class="status-indicator status-${account.status}"></span>
+                    <span class="badge bg-${statusClass}">${account.status.charAt(0).toUpperCase() + account.status.slice(1)}</span>
+                </td>
+                <td><span class="badge bg-secondary">${account.type.toUpperCase()}</span></td>
+                <td>${account.added_today}</td>
+                <td>${account.remaining_limit}</td>
+                <td><small class="text-muted">${account.last_active}</small></td>
+            </tr>
+        `;
+        tbody.innerHTML += row;
+    });
+}
+
+function updateBackgroundTasks(tasks) {
+    const container = document.getElementById('backgroundTasksList');
+    
+    if (tasks.length === 0) {
+        container.innerHTML = `
+            <div class="text-center text-muted">
+                <i class="fas fa-sleep fa-2x mb-2"></i>
+                <br>No active tasks
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = '';
+    tasks.forEach(task => {
+        const statusClass = task.status === 'running' ? 'success' : 'secondary';
+        const taskHtml = `
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <div>
+                    <small class="fw-bold">${task.name}</small>
+                    <br>
+                    <small class="text-muted">${task.status}</small>
+                </div>
+                <span class="badge bg-${statusClass}">${task.status}</span>
+            </div>
+        `;
+        container.innerHTML += taskHtml;
+    });
+}
+
+// Auto-refresh every 30 seconds
+document.addEventListener('DOMContentLoaded', function() {
+    dashboardRefreshInterval = setInterval(refreshData, 30000);
+});
+
+// Clear interval when page is unloaded
+window.addEventListener('beforeunload', function() {
+    if (dashboardRefreshInterval) {
+        clearInterval(dashboardRefreshInterval);
+    }
+});
+</script>
+{% endblock %}
